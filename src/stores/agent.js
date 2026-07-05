@@ -1,7 +1,17 @@
 import { defineStore } from 'pinia';
+import { toRaw } from 'vue';
 import { getDesktopApi } from '../services/desktop.js';
 
 const desktopApi = getDesktopApi();
+
+/**
+ * Deep-clone a reactive proxy into a plain object safe for Electron IPC.
+ * Vue's toRaw only unwraps the top level; JSON round-trip handles nesting.
+ */
+function toPlain(obj) {
+  if (obj == null) return obj;
+  return JSON.parse(JSON.stringify(obj));
+}
 
 function generateId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -96,7 +106,10 @@ export const useAgentStore = defineStore('agent', {
     error: null,
 
     // Event listener registered flag
-    listenerRegistered: false
+    listenerRegistered: false,
+
+    // Session history (persisted sessions)
+    sessionHistory: []
   }),
 
   getters: {
@@ -132,9 +145,10 @@ export const useAgentStore = defineStore('agent', {
     async saveConfig(config) {
       this.config = { ...this.config, ...config };
       try {
-        await desktopApi.agentSetConfig(this.config);
+        await desktopApi.agentSetConfig(toPlain(this.config));
       } catch (err) {
         console.error('Failed to save agent config:', err);
+        throw err;
       }
     },
 
@@ -169,7 +183,7 @@ export const useAgentStore = defineStore('agent', {
     async testModel(model) {
       // Use a simple non-streaming test call via backend
       try {
-        const result = await desktopApi.agentTestModel(model);
+        const result = await desktopApi.agentTestModel(toPlain(model));
         return result;
       } catch (err) {
         return { ok: false, error: err.message };
@@ -352,6 +366,61 @@ export const useAgentStore = defineStore('agent', {
 
     setMode(mode) {
       this.mode = mode;
+    },
+
+    // ===== Session History =====
+
+    async loadSessionHistory() {
+      try {
+        this.sessionHistory = await desktopApi.agentListSessions();
+      } catch (err) {
+        console.error('Failed to load session history:', err);
+        this.sessionHistory = [];
+      }
+    },
+
+    async loadSession(sessionId) {
+      try {
+        const result = await desktopApi.agentLoadSession(sessionId);
+        if (result.ok && result.session) {
+          // Restore messages into the store
+          this.messages = result.session.messages.map((m, i) => ({
+            id: `restored-${sessionId}-${i}`,
+            role: m.role,
+            content: m.content || '',
+            toolCalls: m.tool_calls || [],
+            status: 'done'
+          }));
+          this.sessionId = sessionId;
+          this.mode = result.session.mode || 'agent';
+          return true;
+        }
+        return false;
+      } catch (err) {
+        console.error('Failed to load session:', err);
+        return false;
+      }
+    },
+
+    async deleteSessionFromHistory(sessionId) {
+      try {
+        await desktopApi.agentDeleteSession(sessionId);
+        this.sessionHistory = this.sessionHistory.filter(s => s.id !== sessionId);
+        if (this.sessionId === sessionId) {
+          this.sessionId = null;
+          this.messages = [];
+        }
+      } catch (err) {
+        console.error('Failed to delete session:', err);
+      }
+    },
+
+    async getDiagnostics() {
+      try {
+        return await desktopApi.agentGetDiagnostics();
+      } catch {
+        return [];
+      }
     },
 
     toggleToolCallExpand(messageId, toolCallId) {

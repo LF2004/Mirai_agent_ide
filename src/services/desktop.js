@@ -531,6 +531,10 @@ function buildMockApi() {
     async agentAbort() { return { ok: true }; },
     async agentSend() { return { ok: true }; },
     async agentSetWorkspace() { return { ok: true }; },
+    async agentListSessions() { return []; },
+    async agentLoadSession() { return { ok: false, error: 'Mock mode' }; },
+    async agentDeleteSession() { return { ok: true }; },
+    async agentGetDiagnostics() { return []; },
     onAgentEvent() {},
     offAgentEvent() {}
   };

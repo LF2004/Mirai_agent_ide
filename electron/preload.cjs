@@ -46,6 +46,10 @@ contextBridge.exposeInMainWorld('mirai', {
   agentAbort: () => ipcRenderer.invoke('agent:abort'),
   agentSend: (payload) => ipcRenderer.invoke('agent:send', payload),
   agentSetWorkspace: (wsPath, wsName) => ipcRenderer.invoke('agent:set-workspace', wsPath, wsName),
+  agentListSessions: () => ipcRenderer.invoke('agent:list-sessions'),
+  agentLoadSession: (sessionId) => ipcRenderer.invoke('agent:load-session', sessionId),
+  agentDeleteSession: (sessionId) => ipcRenderer.invoke('agent:delete-session', sessionId),
+  agentGetDiagnostics: () => ipcRenderer.invoke('agent:get-diagnostics'),
   onAgentEvent: (callback) => ipcRenderer.on('agent:event', (_, data) => callback(data)),
   offAgentEvent: () => ipcRenderer.removeAllListeners('agent:event')
 });

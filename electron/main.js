@@ -50,7 +50,7 @@ async function bootstrapServices() {
   workspaceTools = new WorkspaceTools(databaseService);
   terminalTools = new TerminalTools();
   extensionTools = new ExtensionTools(databaseService);
-  agentService = new AgentService(databaseService);
+  agentService = new AgentService(databaseService, app.getPath('userData'));
 }
 
 function registerIpcHandlers() {
@@ -305,6 +305,38 @@ function registerIpcHandlers() {
   ipcMain.handle('agent:set-workspace', async (_, wsPath, wsName) => {
     agentService.setWorkspace(wsPath, wsName);
     return { ok: true };
+  });
+
+  // List persisted sessions for session history
+  ipcMain.handle('agent:list-sessions', async () => {
+    return agentService.listPersistedSessions();
+  });
+
+  // Load a persisted session's messages
+  ipcMain.handle('agent:load-session', async (_, sessionId) => {
+    const session = agentService.getSession(sessionId);
+    if (!session) return { ok: false, error: 'Session not found' };
+    return {
+      ok: true,
+      session: {
+        id: session.id,
+        mode: session.mode,
+        messages: session.messages,
+        title: session.title,
+        createdAt: session.createdAt
+      }
+    };
+  });
+
+  // Delete a session permanently
+  ipcMain.handle('agent:delete-session', async (_, sessionId) => {
+    agentService.deleteSession(sessionId);
+    return { ok: true };
+  });
+
+  // Get diagnostics log
+  ipcMain.handle('agent:get-diagnostics', async () => {
+    return agentService.getDiagnostics();
   });
 }
 

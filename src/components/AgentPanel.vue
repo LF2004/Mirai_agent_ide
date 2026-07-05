@@ -257,7 +257,15 @@ async function saveConfig(testAfterSave = false) {
   const model = normalizeModelForm(editingModel.value);
   agentStore.updateModel(model.id, model);
   agentStore.selectModel(model.id);
-  await agentStore.saveConfig(agentStore.config);
+  try {
+    await agentStore.saveConfig(agentStore.config);
+  } catch (err) {
+    const dialog = inject('ideDialog');
+    if (dialog) {
+      await dialog.alert('保存失败', `模型配置保存失败：${err.message || err}`);
+    }
+    return;
+  }
   emit('model-change', model.id);
 
   if (testAfterSave) {

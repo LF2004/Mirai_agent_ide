@@ -35,6 +35,91 @@ const MODE_PROMPTS = {
 const MAX_TOOL_ROUNDS = 20;
 const LLM_TIMEOUT_MS = 120000;
 const TOOL_TIMEOUT_MS = 30000;
+const TOOL_RETRY_COUNT = 1;
+const CIRCUIT_BREAKER_THRESHOLD = 3;
+const CIRCUIT_BREAKER_COOLDOWN_MS = 60000;
+
+// Explicit state machine constants
+const SESSION_STATUS = {
+  IDLE: 'idle',
+  PROCESSING: 'processing',
+  TOOL_CALLING: 'tool_calling',
+  TURN_ENDED: 'turn_ended',
+  ERROR: 'error',
+  DEGRADED: 'degraded'
+};
+
+// Rough token estimation: ~4 chars per token for English/code
+function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.ceil(String(text).length / 4);
+}
+
+function estimateMessageTokens(msg) {
+  if (!msg) return 0;
+  let total = 4; // role overhead
+  if (msg.content) total += estimateTokens(msg.content);
+  if (msg.tool_calls) {
+    for (const tc of msg.tool_calls) {
+      total += estimateTokens(tc.function?.name || '');
+      total += estimateTokens(tc.function?.arguments || '');
+    }
+  }
+  return total;
+}
+
+/**
+ * Truncate conversation history to fit within the context window.
+ * Always keeps: system message + last N messages.
+ * Older messages are summarized or dropped.
+ */
+function truncateMessages(messages, maxTokens, systemPrompt) {
+  const systemTokens = estimateTokens(systemPrompt);
+  const budget = maxTokens - systemTokens - 1000; // reserve 1k for response
+  if (budget <= 0) return messages;
+
+  let totalTokens = 0;
+  // Walk from the end (most recent) backwards
+  const kept = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const tokens = estimateMessageTokens(messages[i]);
+    if (totalTokens + tokens > budget) break;
+    kept.unshift(messages[i]);
+    totalTokens += tokens;
+  }
+
+  // Ensure we keep at least the last 2 messages (user + assistant)
+  if (kept.length < 2 && messages.length >= 2) {
+    kept.unshift(messages[messages.length - 2]);
+    kept.unshift(messages[messages.length - 1]);
+  }
+
+  return kept;
+}
+
+/**
+ * Load skill prompts from skills/ directory in the workspace.
+ * Each .md file in skills/ becomes a skill prompt.
+ */
+function loadSkills(workspacePath) {
+  if (!workspacePath) return [];
+  const skillsDir = path.join(workspacePath, 'skills');
+  const skills = [];
+  try {
+    if (!fs.existsSync(skillsDir)) return skills;
+    const entries = fs.readdirSync(skillsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith('.md')) {
+        try {
+          const content = fs.readFileSync(path.join(skillsDir, entry.name), 'utf-8');
+          const name = entry.name.replace(/\.md$/, '');
+          skills.push({ name, content: content.slice(0, 2000) }); // cap at 2k chars per skill
+        } catch { /* skip */ }
+      }
+    }
+  } catch { /* skip */ }
+  return skills;
+}
 
 function getToolDefinitions() {
   return [
@@ -151,6 +236,30 @@ function getToolDefinitions() {
 }
 
 async function executeTool(toolName, args, workspacePath) {
+  const maxRetries = TOOL_RETRY_COUNT;
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await executeToolOnce(toolName, args, workspacePath);
+      // Don't retry on logical errors (e.g. "file not found"), only on transient failures
+      if (!result.success && result.error && /timeout|timed out|ECONN|ENOTFOUND|network/i.test(result.error) && attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+        continue;
+      }
+      return result;
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+        continue;
+      }
+    }
+  }
+  return formatError(lastError?.message || 'Tool execution failed after retries');
+}
+
+async function executeToolOnce(toolName, args, workspacePath) {
   try {
     switch (toolName) {
       case 'read_file': {
@@ -329,13 +438,25 @@ function runShellCommand(command, cwd) {
   });
 }
 
+/**
+ * Build layered system prompt:
+ *   Layer 1: Base role definition
+ *   Layer 2: Mode-specific guidance
+ *   Layer 3: Project context (AGENTS.md/.cursorrules/package.json)
+ *   Layer 4: Skills (from skills/ directory)
+ *   Layer 5: Tool schemas
+ *   Layer 6: Task-specific instructions
+ */
 function buildSystemPrompt(mode, workspacePath, workspaceName) {
+  // Layer 1: Base
   let prompt = SYSTEM_PROMPT_BASE;
 
+  // Layer 2: Mode
   if (mode && MODE_PROMPTS[mode]) {
     prompt += '\n\n' + MODE_PROMPTS[mode];
   }
 
+  // Layer 3: Project context
   if (workspacePath) {
     prompt += `\n\nCurrent workspace: ${workspaceName || path.basename(workspacePath)}`;
     prompt += `\nWorkspace path: ${workspacePath}`;
@@ -370,7 +491,25 @@ function buildSystemPrompt(mode, workspacePath, workspaceName) {
     }
   }
 
+  // Layer 4: Skills
+  const skills = loadSkills(workspacePath);
+  if (skills.length > 0) {
+    prompt += '\n\n--- Skills ---';
+    for (const skill of skills) {
+      prompt += `\n\n## Skill: ${skill.name}\n${skill.content}`;
+    }
+  }
+
+  // Layer 5: Tool schemas
   prompt += '\n\nAvailable tools: read_file, write_file, list_files, search_files, run_command, create_file, delete_file, get_workspace_info';
+
+  // Layer 6: Task-specific
+  if (mode === 'multitask') {
+    prompt += '\n\nFor complex tasks, break them into subtasks. Complete each subtask before moving to the next. Summarize what you did after all subtasks are done.';
+  } else if (mode === 'debug') {
+    prompt += '\n\nWhen debugging: 1) Read the error message carefully, 2) Find the relevant code, 3) Identify the root cause, 4) Propose a targeted fix, 5) Verify the fix would work.';
+  }
+
   return prompt;
 }
 
@@ -636,8 +775,10 @@ async function* normalizeStream(chunks, provider) {
 }
 
 export class AgentService {
-  constructor(databaseService) {
+  constructor(databaseService, userDataPath) {
     this.db = databaseService;
+    this.userDataPath = userDataPath || '';
+    this.sessionsDir = userDataPath ? path.join(userDataPath, 'agent-sessions') : '';
     this.config = {
       selectedModelId: '',
       models: []
@@ -646,7 +787,162 @@ export class AgentService {
     this.activeController = null;
     this.workspacePath = '';
     this.workspaceName = '';
+
+    // Circuit breaker state — per session
+    this.circuitBreakers = new Map(); // sessionId -> { errors, lastErrorTime, tripped }
+
+    // Diagnostics log (in-memory ring buffer)
+    this.diagnostics = [];
+    this.maxDiagnostics = 200;
+
+    // Ensure sessions directory exists
+    if (this.sessionsDir) {
+      try {
+        fs.mkdirSync(this.sessionsDir, { recursive: true });
+      } catch { /* ignore */ }
+    }
   }
+
+  // ===== Diagnostics =====
+
+  log(level, message, meta = {}) {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      level,
+      message,
+      ...meta
+    };
+    this.diagnostics.push(entry);
+    if (this.diagnostics.length > this.maxDiagnostics) {
+      this.diagnostics.shift();
+    }
+  }
+
+  getDiagnostics() {
+    return [...this.diagnostics];
+  }
+
+  // ===== Circuit Breaker =====
+
+  getCircuitBreaker(sessionId) {
+    if (!this.circuitBreakers.has(sessionId)) {
+      this.circuitBreakers.set(sessionId, {
+        errors: 0,
+        lastErrorTime: 0,
+        tripped: false
+      });
+    }
+    return this.circuitBreakers.get(sessionId);
+  }
+
+  recordError(sessionId) {
+    const cb = this.getCircuitBreaker(sessionId);
+    cb.errors++;
+    cb.lastErrorTime = Date.now();
+    if (cb.errors >= CIRCUIT_BREAKER_THRESHOLD) {
+      cb.tripped = true;
+      this.log('warn', `Circuit breaker tripped for session ${sessionId} after ${cb.errors} errors`);
+    }
+    return cb.tripped;
+  }
+
+  recordSuccess(sessionId) {
+    const cb = this.getCircuitBreaker(sessionId);
+    cb.errors = 0;
+    cb.tripped = false;
+  }
+
+  isCircuitTripped(sessionId) {
+    const cb = this.getCircuitBreaker(sessionId);
+    if (!cb.tripped) return false;
+    // Auto-reset after cooldown
+    if (Date.now() - cb.lastErrorTime > CIRCUIT_BREAKER_COOLDOWN_MS) {
+      cb.tripped = false;
+      cb.errors = 0;
+      this.log('info', `Circuit breaker reset for session ${sessionId} after cooldown`);
+      return false;
+    }
+    return true;
+  }
+
+  // ===== Session Persistence =====
+
+  persistSession(sessionId) {
+    if (!this.sessionsDir) return;
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    try {
+      const filePath = path.join(this.sessionsDir, `${sessionId}.json`);
+      const data = {
+        id: session.id,
+        mode: session.mode,
+        messages: session.messages,
+        status: session.status,
+        createdAt: session.createdAt,
+        updatedAt: Date.now(),
+        title: session.title || (session.messages[0]?.content?.slice(0, 60) || 'New Session')
+      };
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+    } catch (err) {
+      this.log('error', `Failed to persist session ${sessionId}: ${err.message}`);
+    }
+  }
+
+  loadPersistedSession(sessionId) {
+    if (!this.sessionsDir) return null;
+    try {
+      const filePath = path.join(this.sessionsDir, `${sessionId}.json`);
+      if (!fs.existsSync(filePath)) return null;
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      const session = {
+        id: data.id,
+        mode: data.mode || 'agent',
+        messages: data.messages || [],
+        status: 'idle',
+        createdAt: data.createdAt || Date.now(),
+        title: data.title || 'Restored Session'
+      };
+      this.sessions.set(sessionId, session);
+      return session;
+    } catch {
+      return null;
+    }
+  }
+
+  listPersistedSessions() {
+    if (!this.sessionsDir) return [];
+    try {
+      const files = fs.readdirSync(this.sessionsDir).filter(f => f.endsWith('.json'));
+      const sessions = [];
+      for (const file of files) {
+        try {
+          const data = JSON.parse(fs.readFileSync(path.join(this.sessionsDir, file), 'utf-8'));
+          sessions.push({
+            id: data.id,
+            mode: data.mode,
+            title: data.title || 'Untitled',
+            messageCount: (data.messages || []).length,
+            createdAt: data.createdAt,
+            updatedAt: data.updatedAt || data.createdAt
+          });
+        } catch { /* skip */ }
+      }
+      sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+      return sessions;
+    } catch {
+      return [];
+    }
+  }
+
+  deletePersistedSession(sessionId) {
+    if (!this.sessionsDir) return;
+    try {
+      const filePath = path.join(this.sessionsDir, `${sessionId}.json`);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch { /* ignore */ }
+  }
+
+  // ===== Config =====
 
   setWorkspace(wsPath, wsName) {
     this.workspacePath = wsPath || '';
@@ -661,24 +957,33 @@ export class AgentService {
     return JSON.parse(JSON.stringify(this.config));
   }
 
+  // ===== Session Management =====
+
   createSession(mode = 'agent') {
     const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     this.sessions.set(id, {
       id,
       mode,
       messages: [],
-      status: 'idle',
-      createdAt: Date.now()
+      status: SESSION_STATUS.IDLE,
+      createdAt: Date.now(),
+      title: 'New Session'
     });
+    this.log('info', `Session created: ${id} (mode: ${mode})`);
     return id;
   }
 
   getSession(sessionId) {
-    return this.sessions.get(sessionId);
+    let session = this.sessions.get(sessionId);
+    if (!session) {
+      // Try loading from disk
+      session = this.loadPersistedSession(sessionId);
+    }
+    return session;
   }
 
   getMessages(sessionId) {
-    const session = this.sessions.get(sessionId);
+    const session = this.getSession(sessionId);
     return session ? session.messages : [];
   }
 
@@ -686,18 +991,24 @@ export class AgentService {
     const session = this.sessions.get(sessionId);
     if (session) {
       session.messages = [];
-      session.status = 'idle';
+      session.status = SESSION_STATUS.IDLE;
+      this.persistSession(sessionId);
     }
+    this.circuitBreakers.delete(sessionId);
   }
 
   deleteSession(sessionId) {
     this.sessions.delete(sessionId);
+    this.deletePersistedSession(sessionId);
+    this.circuitBreakers.delete(sessionId);
+    this.log('info', `Session deleted: ${sessionId}`);
   }
 
   abort() {
     if (this.activeController) {
       this.activeController.abort();
       this.activeController = null;
+      this.log('info', 'Agent aborted by user');
     }
   }
 
@@ -743,9 +1054,18 @@ export class AgentService {
   }
 
   async sendMessage(sessionId, content, onEvent) {
-    const session = this.sessions.get(sessionId);
+    let session = this.getSession(sessionId);
     if (!session) {
       onEvent({ type: 'error', error: 'Session not found' });
+      return;
+    }
+
+    // ===== Circuit breaker check =====
+    if (this.isCircuitTripped(sessionId)) {
+      onEvent({
+        type: 'error',
+        error: `Circuit breaker is tripped for this session (too many consecutive errors). Please wait ~60s or clear the session.`
+      });
       return;
     }
 
@@ -759,10 +1079,16 @@ export class AgentService {
     this.activeController = new AbortController();
     const { signal } = this.activeController;
 
+    // ===== State machine: IDLE → PROCESSING =====
     session.messages.push({ role: 'user', content });
-    session.status = 'processing';
+    if (!session.title || session.title === 'New Session') {
+      session.title = content.slice(0, 60);
+    }
+    session.status = SESSION_STATUS.PROCESSING;
+    this.log('info', `sendMessage start`, { sessionId, mode: session.mode, round: 0 });
 
     const tools = getToolDefinitions();
+    const contextWindow = Number(model.contextWindow) || 128000;
     let round = 0;
 
     try {
@@ -771,11 +1097,19 @@ export class AgentService {
 
         if (signal.aborted) break;
 
+        // ===== Context window management =====
         const systemPrompt = buildSystemPrompt(session.mode, this.workspacePath, this.workspaceName);
+        const truncatedHistory = truncateMessages(session.messages, contextWindow, systemPrompt);
         const apiMessages = [
           { role: 'system', content: systemPrompt },
-          ...session.messages
+          ...truncatedHistory
         ];
+
+        this.log('debug', `LLM call`, {
+          round,
+          messages: apiMessages.length,
+          estimatedTokens: apiMessages.reduce((sum, m) => sum + estimateMessageTokens(m), 0)
+        });
 
         const provider = model.provider || 'openai';
         const rawStream = provider === 'anthropic'
@@ -792,7 +1126,6 @@ export class AgentService {
             assistantContent += event.content;
             onEvent({ type: 'text', content: event.content });
           } else if (event.type === 'thinking') {
-            // Thinking tokens — stream as italic placeholder
             onEvent({ type: 'text', content: event.content });
           } else if (event.type === 'tool_call') {
             toolCalls.push({
@@ -831,11 +1164,19 @@ export class AgentService {
 
         session.messages.push(assistantMessage);
 
+        // No tool calls → turn ended
         if (toolCalls.length === 0 || toolCalls.every(tc => !tc?.function?.name)) {
-          session.status = 'idle';
+          session.status = SESSION_STATUS.TURN_ENDED;
+          session.status = SESSION_STATUS.IDLE;
+          this.recordSuccess(sessionId);
+          this.persistSession(sessionId);
+          this.log('info', `sendMessage done`, { sessionId, round, toolCalls: 0 });
           onEvent({ type: 'done' });
           return;
         }
+
+        // ===== State machine: PROCESSING → TOOL_CALLING =====
+        session.status = SESSION_STATUS.TOOL_CALLING;
 
         for (const tc of toolCalls) {
           if (!tc?.function?.name) continue;
@@ -855,6 +1196,7 @@ export class AgentService {
             // keep empty args
           }
 
+          // Read-only mode enforcement
           const readOnly = session.mode === 'plan' || session.mode === 'ask';
           const writeTools = ['write_file', 'create_file', 'delete_file', 'run_command'];
           if (readOnly && writeTools.includes(tc.function.name)) {
@@ -871,36 +1213,53 @@ export class AgentService {
             continue;
           }
 
+          // Execute tool (with retry built into executeTool)
+          this.log('debug', `Tool call`, { tool: tc.function.name, args: parsedArgs });
           const result = await executeTool(tc.function.name, parsedArgs, this.workspacePath);
           const resultStr = result.success ? result.result : `Error: ${result.error}`;
 
           session.messages.push({
             role: 'tool',
             tool_call_id: tc.id,
-            content: resultStr
+            content: typeof resultStr === 'string' ? resultStr : JSON.stringify(resultStr)
           });
 
           onEvent({ type: 'tool_result', id: tc.id, result });
+          this.log('debug', `Tool result`, { tool: tc.function.name, success: result.success });
         }
 
         if (signal.aborted) break;
 
+        // Persist after each tool round
+        this.persistSession(sessionId);
+
+        // ===== State machine: TOOL_CALLING → PROCESSING (next round) =====
+        session.status = SESSION_STATUS.PROCESSING;
         onEvent({ type: 'round_end', round });
       }
 
       if (round >= MAX_TOOL_ROUNDS) {
         onEvent({ type: 'text', content: '\n\n[Agent reached maximum tool call rounds (' + MAX_TOOL_ROUNDS + '). Stopping.]' });
+        this.log('warn', `Max tool rounds reached`, { sessionId, round });
       }
 
-      session.status = 'idle';
+      session.status = SESSION_STATUS.IDLE;
+      this.recordSuccess(sessionId);
+      this.persistSession(sessionId);
       onEvent({ type: 'done' });
     } catch (err) {
-      session.status = 'idle';
+      session.status = SESSION_STATUS.ERROR;
+      session.status = SESSION_STATUS.IDLE; // reset for next attempt
       if (err.name === 'AbortError') {
         onEvent({ type: 'done', aborted: true });
+        this.log('info', `sendMessage aborted`, { sessionId, round });
       } else {
+        // Record error for circuit breaker
+        const tripped = this.recordError(sessionId);
         onEvent({ type: 'error', error: err.message || String(err) });
+        this.log('error', `sendMessage error`, { sessionId, round, error: err.message, circuitTripped: tripped });
       }
+      this.persistSession(sessionId);
     } finally {
       this.activeController = null;
     }
