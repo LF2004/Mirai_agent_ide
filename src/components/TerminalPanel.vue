@@ -2,6 +2,7 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon } from '@xterm/addon-search';
 import '@xterm/xterm/css/xterm.css';
 import { t } from '../utils/i18n.js';
 
@@ -29,15 +30,34 @@ const emit = defineEmits(['toggle-collapse', 'update:height']);
 const terminalHostRef = ref(null);
 const terminal = ref(null);
 const fitAddon = ref(null);
+const searchAddonRef = ref(null);
 const terminalSessions = ref([]);
 const activeTerminalId = ref('');
 const resizeObserver = ref(null);
 const panelRef = ref(null);
 const isResizing = ref(false);
+const terminalSearchVisible = ref(false);
+const terminalSearchQuery = ref('');
 let refreshTimer = null;
 
 function toggleCollapse() {
   emit('toggle-collapse');
+}
+
+function toggleTerminalSearch() {
+  terminalSearchVisible.value = !terminalSearchVisible.value;
+  if (!terminalSearchVisible.value) {
+    terminalSearchQuery.value = '';
+  }
+}
+
+function doTerminalSearch(direction) {
+  if (!searchAddonRef.value || !terminalSearchQuery.value) return;
+  if (direction === 'prev') {
+    searchAddonRef.value.findPrevious(terminalSearchQuery.value);
+  } else {
+    searchAddonRef.value.findNext(terminalSearchQuery.value);
+  }
 }
 
 function startResize(event) {
@@ -181,6 +201,9 @@ onMounted(async () => {
 
   fitAddon.value = new FitAddon();
   terminal.value.loadAddon(fitAddon.value);
+  const searchAddon = new SearchAddon();
+  terminal.value.loadAddon(searchAddon);
+  searchAddonRef.value = searchAddon;
   terminal.value.open(terminalHostRef.value);
   bindTerminalEvents(terminal.value);
 
@@ -273,6 +296,7 @@ defineExpose({
         </button>
       </div>
       <div class="terminal-panel__actions">
+        <button v-if="terminalSessions.length" class="icon-button codicon codicon-search" title="Search" @click="toggleTerminalSearch"></button>
         <button class="icon-button codicon codicon-add" :title="t('newTerminal')" @click="createTerminalSession"></button>
         <button
           class="icon-button"
@@ -281,6 +305,18 @@ defineExpose({
           @click="toggleCollapse"
         ></button>
       </div>
+    </div>
+    <div v-if="terminalSearchVisible && !collapsed" class="terminal-search-bar">
+      <input
+        v-model="terminalSearchQuery"
+        class="terminal-search-bar__input"
+        placeholder="Search terminal..."
+        @keydown.enter.prevent="doTerminalSearch('next')"
+        @keydown.escape="toggleTerminalSearch"
+      />
+      <button class="icon-button codicon codicon-arrow-up" title="Previous" @click="doTerminalSearch('prev')"></button>
+      <button class="icon-button codicon codicon-arrow-down" title="Next" @click="doTerminalSearch('next')"></button>
+      <button class="icon-button codicon codicon-close" title="Close" @click="toggleTerminalSearch"></button>
     </div>
     <div v-show="!collapsed" class="terminal-panel__body">
       <div ref="terminalHostRef" class="terminal-host"></div>

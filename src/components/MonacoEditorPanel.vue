@@ -10,7 +10,8 @@ import {
   highlightActiveLineGutter,
   keymap,
   lineNumbers,
-  rectangularSelection
+  rectangularSelection,
+  Decoration
 } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab, undo, redo } from '@codemirror/commands';
 import {
@@ -86,11 +87,16 @@ const props = defineProps({
   smoothScrolling: {
     type: Boolean,
     default: false
+  },
+  minimap: {
+    type: Boolean,
+    default: true
   }
 });
 
 const emit = defineEmits(['change', 'save', 'cursor-change']);
 const containerRef = ref(null);
+const minimapRef = ref(null);
 const editorView = ref(null);
 const languageCompartment = new Compartment();
 const wrapCompartment = new Compartment();
@@ -99,7 +105,12 @@ const featuresCompartment = new Compartment();
 const themeCompartment = new Compartment();
 const emptyState = computed(() => !props.filePath);
 const isImageFile = computed(() => props.file?.kind === 'image');
+const breadcrumbSegments = computed(() => {
+  if (!props.filePath) return [];
+  return props.filePath.replace(/\\/g, '/').split('/').filter(Boolean);
+});
 let applyingExternalChange = false;
+let minimapRaf = null;
 
 function extensionFromPath(filePath) {
   return (filePath.split(/[\\/]/).pop() || '').split('.').pop()?.toLowerCase() || '';
@@ -622,7 +633,145 @@ function buildFeaturesExtension() {
     exts.push(bracketMatching());
   }
   exts.push(indentOnInput());
+  // Render whitespace via decorations
+  if (props.renderWhitespace && props.renderWhitespace !== 'none') {
+    exts.push(buildWhitespacePlugin());
+  }
   return exts;
+}
+
+// ===== Whitespace rendering plugin =====
+function buildWhitespacePlugin() {
+  return EditorView.decorations.of((view) => {
+    const { state } = view;
+    const doc = state.doc;
+    const decorations = [];
+    for (let i = 1; i <= doc.lines; i++) {
+      const line = doc.line(i);
+      const text = line.text;
+      let pos = line.from;
+      for (let j = 0; j < text.length; j++) {
+        const ch = text[j];
+        if (ch === ' ' || ch === '\t') {
+          const isBoundary = props.renderWhitespace === 'boundary';
+          const prevChar = j > 0 ? text[j - 1] : '';
+          const nextChar = j < text.length - 1 ? text[j + 1] : '';
+          const isAtBoundary = prevChar === '' || nextChar === '' || prevChar === ch;
+          if (!isBoundary || isAtBoundary) {
+            decorations.push({
+              from: pos + j,
+              to: pos + j + 1,
+              value: Decoration.mark({ class: 'cm-whitespace' })
+            });
+          }
+        }
+      }
+    }
+    return Decoration.set(decorations);
+  });
+}
+
+// ===== Minimap =====
+function renderMinimap() {
+  if (!minimapRef.value || !editorView.value) return;
+  const canvas = minimapRef.value;
+  const ctx = canvas.getContext('2d');
+  const view = editorView.value;
+  const doc = view.state.doc;
+  const lines = doc.lines;
+  const lineHeight = 2;
+  const charWidth = 1.2;
+
+  const dpr = window.devicePixelRatio || 1;
+  const cssWidth = canvas.clientWidth || 80;
+  const cssHeight = canvas.clientHeight || 300;
+  canvas.width = cssWidth * dpr;
+  canvas.height = cssHeight * dpr;
+  ctx.scale(dpr, dpr);
+
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+  ctx.font = `${lineHeight * 4}px monospace`;
+
+  // Get visible line range
+  const scrollTop = view.scrollDOM.scrollTop;
+  const editorLineHeight = 21;
+  const visibleStart = Math.floor(scrollTop / editorLineHeight);
+  const visibleCount = Math.ceil(cssHeight / lineHeight);
+  const startLine = Math.max(0, Math.floor(scrollTop / editorLineHeight) - 5);
+  const maxLines = Math.min(lines, startLine + visibleCount + 20);
+
+  // Get theme colors
+  const styles = getComputedStyle(document.documentElement);
+  const bgColor = styles.getPropertyValue('--editor-bg').trim() || '#1e1e1e';
+  const fgColor = styles.getPropertyValue('--editor-fg').trim() || '#d4d4d4';
+  const keywordColor = styles.getPropertyValue('--syntax-keyword').trim() || '#569cd6';
+  const stringColor = styles.getPropertyValue('--syntax-string').trim() || '#ce9178';
+  const commentColor = styles.getPropertyValue('--syntax-comment').trim() || '#6a9955';
+  const numberColor = styles.getPropertyValue('--syntax-number').trim() || '#b5cea8';
+
+  ctx.fillStyle = bgColor;
+  ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+  for (let i = startLine; i < maxLines; i++) {
+    const line = doc.line(i + 1);
+    const text = line.text;
+    const y = i * lineHeight;
+    if (y > cssHeight) break;
+
+    let x = 2;
+    for (let j = 0; j < text.length && x < cssWidth; j++) {
+      const ch = text[j];
+      if (ch === ' ') { x += charWidth * 0.5; continue; }
+      if (ch === '\t') { x += charWidth * 4; continue; }
+
+      // Simple color heuristic
+      let color = fgColor;
+      if (j < text.length) {
+        const remaining = text.slice(j);
+        if (/^\s*(\/\/|\/\*|#)/.test(text.slice(0, j + 2))) {
+          color = commentColor;
+        } else if (ch === '"' || ch === "'" || ch === '`') {
+          color = stringColor;
+        } else if (/\d/.test(ch)) {
+          color = numberColor;
+        } else if (/[a-zA-Z_$]/.test(ch)) {
+          const wordMatch = remaining.match(/^(\w+)/);
+          if (wordMatch) {
+            const word = wordMatch[1];
+            if (JS_KEYWORDS.includes(word) || PYTHON_KEYWORDS.includes(word)) {
+              color = keywordColor;
+            }
+          }
+        }
+      }
+
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y, charWidth, lineHeight);
+      x += charWidth;
+    }
+  }
+
+  // Draw viewport indicator
+  const viewStartY = (scrollTop / editorLineHeight) * lineHeight;
+  const viewHeight = (canvas.clientHeight / editorLineHeight) * lineHeight * (cssHeight / (view.scrollDOM.scrollHeight || 1));
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+  ctx.fillRect(0, viewStartY, cssWidth, Math.min(viewHeight, cssHeight));
+}
+
+function scheduleMinimap() {
+  if (minimapRaf) return;
+  minimapRaf = requestAnimationFrame(() => {
+    minimapRaf = null;
+    renderMinimap();
+  });
+}
+
+function handleMinimapClick(event) {
+  if (!editorView.value || !minimapRef.value) return;
+  const rect = minimapRef.value.getBoundingClientRect();
+  const ratio = (event.clientY - rect.top) / rect.height;
+  const scrollDom = editorView.value.scrollDOM;
+  scrollDom.scrollTop = ratio * scrollDom.scrollHeight - scrollDom.clientHeight / 2;
 }
 
 function createState(doc) {
@@ -675,6 +824,9 @@ function createState(doc) {
           const col = head - line.from + 1;
           emit('cursor-change', { line: line.number, col });
         }
+        if (update.docChanged || update.viewportChanged) {
+          scheduleMinimap();
+        }
       })
     ]
   });
@@ -719,14 +871,31 @@ function revealLine(lineNumber) {
   editorView.value.focus();
 }
 
+let scrollDomRef = null;
+
+function handleScroll() {
+  scheduleMinimap();
+}
+
 onMounted(() => {
   editorView.value = new EditorView({
     state: createState(props.content || ''),
     parent: containerRef.value
   });
+  if (editorView.value && props.minimap) {
+    scrollDomRef = editorView.value.scrollDOM;
+    scrollDomRef.addEventListener('scroll', handleScroll);
+    nextTick(() => renderMinimap());
+  }
 });
 
 onBeforeUnmount(() => {
+  if (scrollDomRef) {
+    scrollDomRef.removeEventListener('scroll', handleScroll);
+  }
+  if (minimapRaf) {
+    cancelAnimationFrame(minimapRaf);
+  }
   editorView.value?.destroy();
 });
 
@@ -797,11 +966,37 @@ watch(
 );
 
 watch(
-  () => [props.lineNumbers, props.bracketPairColorization],
+  () => [props.lineNumbers, props.bracketPairColorization, props.renderWhitespace],
   () => {
     editorView.value?.dispatch({
       effects: featuresCompartment.reconfigure(buildFeaturesExtension())
     });
+  }
+);
+
+watch(
+  () => props.minimap,
+  (visible) => {
+    if (visible) {
+      nextTick(() => {
+        if (editorView.value && !scrollDomRef) {
+          scrollDomRef = editorView.value.scrollDOM;
+          scrollDomRef.addEventListener('scroll', handleScroll);
+        }
+        renderMinimap();
+      });
+    } else if (scrollDomRef) {
+      scrollDomRef.removeEventListener('scroll', handleScroll);
+      scrollDomRef = null;
+    }
+  }
+);
+
+watch(
+  () => props.content,
+  (content) => {
+    replaceDocument(content);
+    scheduleMinimap();
   }
 );
 
@@ -894,14 +1089,28 @@ defineExpose({
   redo: editorRedo,
   focus: focusEditor,
   format: editorFormat,
-  goToDefinition: editorGoToDefinition
+  goToDefinition: editorGoToDefinition,
+  goToLine: revealLine
 });
 </script>
 
 <template>
   <div class="editor-panel">
     <div class="editor-panel__toolbar">
-      <span>{{ filePath || t('selectFileToEdit') }}</span>
+      <div class="editor-breadcrumbs">
+        <span class="editor-breadcrumbs__icon codicon codicon-folder"></span>
+        <template v-if="filePath">
+          <span
+            v-for="(segment, index) in breadcrumbSegments"
+            :key="index"
+            class="editor-breadcrumbs__segment"
+          >
+            <span class="editor-breadcrumbs__chevron codicon codicon-chevron-right"></span>
+            <span class="editor-breadcrumbs__name">{{ segment }}</span>
+          </span>
+        </template>
+        <span v-else class="editor-breadcrumbs__placeholder">{{ t('selectFileToEdit') }}</span>
+      </div>
       <div class="editor-panel__actions">
         <span class="editor-panel__hint">{{ t('saveHint') }}</span>
         <button class="ghost-button" @click="$emit('save')" :disabled="emptyState || isImageFile">{{ t('saveFile') }}</button>
@@ -921,7 +1130,15 @@ defineExpose({
           <span>{{ file.mime }} · {{ Math.max(1, Math.round((file.size || 0) / 1024)) }} KB</span>
         </div>
       </div>
-      <div v-show="!emptyState && !isImageFile" ref="containerRef" class="editor-panel__container"></div>
+      <div v-show="!emptyState && !isImageFile" class="editor-panel__editor-wrapper">
+        <div ref="containerRef" class="editor-panel__container"></div>
+        <canvas
+          v-if="minimap && !emptyState && !isImageFile"
+          ref="minimapRef"
+          class="editor-minimap"
+          @click="handleMinimapClick"
+        ></canvas>
+      </div>
     </div>
   </div>
 </template>

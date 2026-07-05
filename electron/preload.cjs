@@ -30,5 +30,9 @@ contextBridge.exposeInMainWorld('mirai', {
   writeTerminal: (payload) => ipcRenderer.invoke('terminal:write', payload),
   readTerminal: (payload) => ipcRenderer.invoke('terminal:read', payload),
   killTerminal: (payload) => ipcRenderer.invoke('terminal:kill', payload),
-  focusTerminal: (payload) => ipcRenderer.invoke('terminal:focus', payload)
+  focusTerminal: (payload) => ipcRenderer.invoke('terminal:focus', payload),
+  watchWorkspace: (payload) => ipcRenderer.invoke('workspace:watch', payload),
+  unwatchWorkspace: () => ipcRenderer.invoke('workspace:unwatch'),
+  onFileChanged: (callback) => ipcRenderer.on('workspace:file-changed', (_, data) => callback(data)),
+  offFileChanged: () => ipcRenderer.removeAllListeners('workspace:file-changed')
 });

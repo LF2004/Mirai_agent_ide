@@ -533,6 +533,18 @@ export const useWorkspaceStore = defineStore('workspace', {
 
       target.content = content;
       target.dirty = true;
+
+      // Auto-save: afterDelay mode
+      if (this.autoSave === 'afterDelay') {
+        if (this._autoSaveTimer) {
+          clearTimeout(this._autoSaveTimer);
+        }
+        this._autoSaveTimer = setTimeout(async () => {
+          if (target.dirty) {
+            await this.saveActiveFile();
+          }
+        }, 1000);
+      }
     },
     closeFile(filePath) {
       const index = this.openFiles.findIndex((file) => file.path === filePath);
@@ -559,6 +571,15 @@ export const useWorkspaceStore = defineStore('workspace', {
       if (!this.openFiles.find((file) => file.path === this.activeFilePath)) {
         this.activeFilePath = this.openFiles[0]?.path || '';
       }
+    },
+    reorderFiles(from, to) {
+      if (from === to || from < 0 || to < 0 || from >= this.openFiles.length || to >= this.openFiles.length) {
+        return;
+      }
+      const files = [...this.openFiles];
+      const [moved] = files.splice(from, 1);
+      files.splice(to, 0, moved);
+      this.openFiles = files;
     },
     async saveActiveFile() {
       if (!this.workspacePath || !this.activeFile || this.activeFile.kind !== 'text') {

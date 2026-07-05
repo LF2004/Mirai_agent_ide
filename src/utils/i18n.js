@@ -207,6 +207,10 @@ const messages = {
     noResults: 'No matching commands',
     formatDocument: 'Format Document',
     goToDefinition: 'Go to Definition',
+    findInFolder: 'Find in Folder...',
+    goToLine: 'Go to Line...',
+    zenMode: 'Toggle Zen Mode',
+    openEditors: 'Open Editors',
   },
   zh: {
     appName: 'Mirai Agent IDE',
@@ -409,6 +413,10 @@ const messages = {
     noResults: '没有匹配的命令',
     formatDocument: '格式化文档',
     goToDefinition: '转到定义',
+    findInFolder: '在文件夹中查找...',
+    goToLine: '跳转到行...',
+    zenMode: '切换禅模式',
+    openEditors: '已打开的编辑器',
   }
 };
 

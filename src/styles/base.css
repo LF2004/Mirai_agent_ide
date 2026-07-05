@@ -2449,3 +2449,203 @@ button {
 .context-menu__item:hover:not(.is-disabled) .context-menu__shortcut {
   color: rgba(255, 255, 255, 0.7);
 }
+
+/* ===== Editor minimap ===== */
+.editor-panel__editor-wrapper {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+
+.editor-panel__container {
+  flex: 1;
+  height: 100%;
+  overflow: hidden;
+}
+
+.editor-minimap {
+  width: 80px;
+  height: 100%;
+  flex: 0 0 80px;
+  cursor: pointer;
+  border-left: 1px solid var(--border);
+  background: var(--editor-bg);
+}
+
+/* ===== Editor breadcrumbs ===== */
+.editor-breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.editor-breadcrumbs__icon {
+  color: var(--text-soft);
+  font-size: 14px;
+  margin-right: 4px;
+}
+
+.editor-breadcrumbs__segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.editor-breadcrumbs__chevron {
+  font-size: 10px;
+  color: var(--text-soft);
+  margin: 0 2px;
+}
+
+.editor-breadcrumbs__name {
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.editor-breadcrumbs__name:hover {
+  color: var(--accent);
+}
+
+.editor-breadcrumbs__placeholder {
+  color: var(--text-soft);
+}
+
+/* ===== Whitespace rendering ===== */
+.cm-whitespace::before {
+  content: '\00B7';
+  color: var(--text-soft);
+  opacity: 0.3;
+  font-size: 0.8em;
+}
+
+/* ===== Tab drag styles ===== */
+.editor-tab.is-dragging {
+  opacity: 0.4;
+}
+
+.editor-tab.is-drag-over {
+  border-left: 2px solid var(--accent);
+}
+
+.editor-tab__name.is-dirty {
+  font-style: italic;
+}
+
+/* ===== File tree filter ===== */
+.file-tree__filter {
+  position: relative;
+  padding: 4px 8px;
+}
+
+.file-tree__filter-input {
+  width: 100%;
+  background: var(--cursor-input);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text-main);
+  font-size: 12px;
+  padding: 3px 20px 3px 8px;
+  outline: none;
+}
+
+.file-tree__filter-input:focus {
+  border-color: var(--accent);
+}
+
+.file-tree__filter-input::placeholder {
+  color: var(--text-soft);
+}
+
+.file-tree__filter-clear {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  cursor: pointer;
+  color: var(--text-soft);
+  font-size: 14px;
+}
+
+.file-tree__filter-clear:hover {
+  color: var(--text-main);
+}
+
+/* ===== Terminal search bar ===== */
+.terminal-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--bg-panel-alt);
+  border-bottom: 1px solid var(--border);
+}
+
+.terminal-search-bar__input {
+  flex: 1;
+  background: var(--cursor-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  color: var(--text-main);
+  font-size: 12px;
+  padding: 2px 6px;
+  outline: none;
+}
+
+.terminal-search-bar__input:focus {
+  border-color: var(--accent);
+}
+
+/* ===== Command palette detail ===== */
+.command-palette__detail {
+  font-size: 11px;
+  color: var(--text-soft);
+  opacity: 0.7;
+  margin-right: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+/* ===== Zen mode ===== */
+.shell.is-zen .workbench {
+  grid-template-columns: 1fr;
+}
+
+.shell.is-zen .workspace-shell {
+  grid-template-columns: 1fr;
+}
+
+.zen-exit-hint {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--panel-bg-strong);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--text-soft);
+  cursor: pointer;
+  z-index: 10000;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+}
+
+.zen-exit-hint:hover {
+  opacity: 1;
+}
+
+/* ===== Sidebar hidden state ===== */
+.workspace-shell:has(> .sidebar:not([style*="display"])) {
+  grid-template-columns: 1fr;
+}
+
+.workspace-shell:not(:has(> .sidebar)) {
+  grid-template-columns: 1fr;
+}

@@ -56,6 +56,7 @@ const {
   smoothScrolling
 } = storeToRefs(workspaceStore);
 const activeSidebar = ref('explorer');
+const sidebarVisible = ref(true);
 const isAgentCollapsed = ref(false);
 const draftProjectName = ref('mirai-demo');
 const inlineEdit = ref(null);
@@ -74,7 +75,11 @@ const editorContextMenu = ref({ visible: false, x: 0, y: 0 });
 const commandPaletteOpen = ref(false);
 const commandPaletteQuery = ref('');
 const commandPaletteInputRef = ref(null);
+const commandPaletteMode = ref('commands'); // 'commands' or 'files'
 const editorCursorPos = ref({ line: 1, col: 1 });
+const goToLineOpen = ref(false);
+const goToLineValue = ref('');
+const zenMode = ref(false);
 
 const editorSectionStyle = computed(() => {
   const terminalRow = isTerminalCollapsed.value ? '34px' : `${terminalHeight.value}px`;
@@ -330,7 +335,7 @@ function focusTerminal() {
 }
 
 function toggleSidebar() {
-  activeSidebar.value = activeSidebar.value === 'explorer' ? 'settings' : 'explorer';
+  sidebarVisible.value = !sidebarVisible.value;
 }
 
 function togglePanels() {
@@ -445,16 +450,52 @@ function handleMenuKeydown(event) {
   if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'p') {
     event.preventDefault();
     commandPaletteOpen.value = true;
+    commandPaletteMode.value = 'commands';
     commandPaletteQuery.value = '';
     closeMenu();
+    return;
   }
 
-  // Quick open: Ctrl+P
+  // Quick open file: Ctrl+P (without Shift)
   if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === 'p' && !isInputFocused()) {
     event.preventDefault();
     commandPaletteOpen.value = true;
+    commandPaletteMode.value = 'files';
     commandPaletteQuery.value = '';
     closeMenu();
+    return;
+  }
+
+  // Go to line: Ctrl+G
+  if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === 'g' && !isInputFocused()) {
+    event.preventDefault();
+    goToLineOpen.value = true;
+    goToLineValue.value = String(editorCursorPos.value.line);
+    closeMenu();
+    return;
+  }
+
+  // Zen mode: Ctrl+K Z
+  if (event.ctrlKey && event.key.toLowerCase() === 'k' && !event.shiftKey) {
+    event.preventDefault();
+    // Wait for next key
+    const handler = (e) => {
+      if (e.key.toLowerCase() === 'z') {
+        zenMode.value = !zenMode.value;
+      }
+      document.removeEventListener('keydown', handler);
+    };
+    document.addEventListener('keydown', handler);
+    setTimeout(() => document.removeEventListener('keydown', handler), 2000);
+    return;
+  }
+
+  // Toggle sidebar: Ctrl+B
+  if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === 'b' && !isInputFocused()) {
+    event.preventDefault();
+    toggleSidebar();
+    closeMenu();
+    return;
   }
 
   if (eventMatchesShortcut(event, keybinds.value.undo)) {
@@ -615,10 +656,66 @@ function handleModelChange(model) {
 
 function handleEditorChange(value) {
   workspaceStore.setActiveFileContent(value);
+  // Auto-save: onFocusChange mode
+  if (autoSave.value === 'onFocusChange') {
+    // Will be saved when focus changes away from this file
+  }
+}
+
+// ===== File watcher =====
+watch(workspacePath, async (newPath) => {
+  if (newPath) {
+    desktopApi.watchWorkspace?.({ workspacePath: newPath });
+    desktopApi.onFileChanged?.(() => {
+      workspaceStore.refreshFileTree();
+    });
+  } else {
+    desktopApi.unwatchWorkspace?.();
+  }
+});
+
+// Auto-save on focus change: when switching files, save the previous file if dirty
+watch(activeFilePath, (newPath, oldPath) => {
+  if (autoSave.value === 'onFocusChange' && oldPath && oldPath !== newPath) {
+    const oldFile = openFiles.value.find((f) => f.path === oldPath);
+    if (oldFile?.dirty) {
+      workspaceStore.setActiveFile(oldPath);
+      workspaceStore.saveActiveFile().then(() => {
+        workspaceStore.setActiveFile(newPath);
+      });
+    }
+  }
+});
+
+// Auto-save on window blur
+function handleWindowBlur() {
+  if (autoSave.value === 'onFocusChange' && activeFilePath.value) {
+    const file = openFiles.value.find((f) => f.path === activeFilePath.value);
+    if (file?.dirty) {
+      workspaceStore.saveActiveFile();
+    }
+  }
 }
 
 function handleCloseFile(filePath) {
+  // Check if the file is dirty and prompt to save
+  const file = openFiles.value.find((f) => f.path === filePath);
+  if (file?.dirty) {
+    const fileName = filePath.split(/[\\/]/).pop() || filePath;
+    const shouldSave = window.confirm(`"${fileName}" has unsaved changes. Save before closing?`);
+    if (shouldSave) {
+      workspaceStore.setActiveFile(filePath);
+      workspaceStore.saveActiveFile().then(() => {
+        workspaceStore.closeFile(filePath);
+      });
+      return;
+    }
+  }
   workspaceStore.closeFile(filePath);
+}
+
+function handleReorderFiles({ from, to }) {
+  workspaceStore.reorderFiles(from, to);
 }
 
 async function handleSearchResultSelect(result) {
@@ -742,9 +839,47 @@ function handleRevealInExplorer(filePath) {
   workspaceStore.revealWorkspace(filePath);
 }
 
+function handleFindInFolder(folderPath) {
+  activeSidebar.value = 'search';
+  searchState.value.includeFiles = folderPath + '/**';
+  searchState.value.query = '';
+}
+
 // ===== Command palette =====
 
 const commandPaletteItems = computed(() => {
+  if (commandPaletteMode.value === 'files') {
+    // File quick-open mode
+    const q = commandPaletteQuery.value.trim().toLowerCase();
+    let files = [];
+    if (fileTree.value) {
+      const collect = (nodes) => {
+        for (const node of nodes || []) {
+          if (node.type === 'file') {
+            files.push(node);
+          }
+          if (node.children) {
+            collect(node.children);
+          }
+        }
+      };
+      collect(fileTree.value);
+    }
+    if (q) {
+      files = files.filter((f) => f.path.toLowerCase().includes(q) || f.name.toLowerCase().includes(q));
+    }
+    return files.slice(0, 50).map((f) => ({
+      id: `file:${f.path}`,
+      label: f.name,
+      detail: f.path,
+      icon: 'codicon codicon-file',
+      action: async () => {
+        await workspaceStore.openFile(f.path);
+      }
+    }));
+  }
+
+  // Command mode
   const commands = [
     { id: 'file.new', label: t('newFile'), shortcut: 'Ctrl+N', icon: 'codicon codicon-new-file', action: requestCreateFile },
     { id: 'file.newFolder', label: t('newFolder'), icon: 'codicon codicon-new-folder', action: requestCreateFolder },
@@ -781,13 +916,35 @@ const commandPaletteItems = computed(() => {
 function handleCommandSelect(item) {
   commandPaletteOpen.value = false;
   commandPaletteQuery.value = '';
+  commandPaletteMode.value = 'commands';
   item.action?.();
+}
+
+function handleGoToLine() {
+  const value = goToLineValue.value.trim();
+  const lineNum = parseInt(value, 10);
+  if (lineNum > 0) {
+    editorPanelRef.value?.goToLine?.(lineNum);
+  }
+  goToLineOpen.value = false;
+  goToLineValue.value = '';
+}
+
+function handleGoToLineKeydown(event) {
+  if (event.key === 'Escape') {
+    goToLineOpen.value = false;
+    goToLineValue.value = '';
+  }
+  if (event.key === 'Enter') {
+    handleGoToLine();
+  }
 }
 
 function handleCommandPaletteKeydown(event) {
   if (event.key === 'Escape') {
     commandPaletteOpen.value = false;
     commandPaletteQuery.value = '';
+    commandPaletteMode.value = 'commands';
   }
   if (event.key === 'Enter') {
     const first = commandPaletteItems.value.find((i) => !i.separator && !i.disabled);
@@ -826,18 +983,20 @@ onMounted(async () => {
   await workspaceStore.bootstrap();
   document.addEventListener('pointerdown', handleGlobalPointerDown);
   document.addEventListener('keydown', handleMenuKeydown);
+  window.addEventListener('blur', handleWindowBlur);
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', handleGlobalPointerDown);
   document.removeEventListener('keydown', handleMenuKeydown);
+  window.removeEventListener('blur', handleWindowBlur);
 });
 </script>
 
 <template>
-  <div v-if="isReady" class="shell" :data-theme="activeTheme">
+  <div v-if="isReady" class="shell" :data-theme="activeTheme" :class="{ 'is-zen': zenMode }">
     <div class="workbench">
-      <nav class="activitybar">
+      <nav class="activitybar" v-if="!zenMode">
         <button
           class="activitybar__item codicon codicon-files"
           :class="{ 'is-active': activeSidebar === 'explorer' }"
@@ -870,7 +1029,7 @@ onBeforeUnmount(() => {
         ></button>
       </nav>
 
-      <header class="titlebar" ref="menuRootRef" :key="menuRefreshKey">
+      <header class="titlebar" ref="menuRootRef" :key="menuRefreshKey" v-if="!zenMode">
         <div class="titlebar__left">
           <strong class="titlebar__logo">{{ appInfo.name }}</strong>
           <div class="titlebar__menus">
@@ -937,7 +1096,7 @@ onBeforeUnmount(() => {
       </header>
 
       <div class="workspace-shell">
-        <aside class="sidebar">
+        <aside class="sidebar" v-if="sidebarVisible && !zenMode">
           <SidebarExplorer
             v-if="activeSidebar === 'explorer'"
             :workspace-name="workspaceName"
@@ -956,6 +1115,7 @@ onBeforeUnmount(() => {
             @delete-node="requestDeleteNode"
             @inline-confirm="confirmInlineEdit"
             @inline-cancel="cancelInlineEdit"
+            @find-in-folder="handleFindInFolder"
           />
 
           <SearchPanel
@@ -1056,6 +1216,7 @@ onBeforeUnmount(() => {
               @copy-path="handleCopyPath"
               @copy-relative-path="handleCopyRelativePath"
               @reveal-in-explorer="handleRevealInExplorer"
+              @reorder="handleReorderFiles"
             />
             <MonacoEditorPanel
               ref="editorPanelRef"
@@ -1072,6 +1233,7 @@ onBeforeUnmount(() => {
               :bracket-pair-colorization="bracketPairColorization"
               :cursor-blinking="cursorBlinking"
               :smooth-scrolling="smoothScrolling"
+              :minimap="minimap"
               @change="handleEditorChange"
               @save="handleSaveFile"
               @cursor-change="handleEditorCursorChange"
@@ -1102,7 +1264,7 @@ onBeforeUnmount(() => {
         </main>
       </div>
 
-      <footer class="statusbar">
+      <footer class="statusbar" v-if="!zenMode">
         <span class="statusbar__item" :class="{ 'statusbar__item--active': workspacePath }">
           <span class="codicon codicon-folder"></span>
           {{ workspacePath || t('noWorkspaceSelected') }}
@@ -1141,6 +1303,13 @@ onBeforeUnmount(() => {
         </div>
       </Transition>
 
+      <!-- Zen mode exit -->
+      <Transition name="cmd-palette">
+        <div v-if="zenMode" class="zen-exit-hint" @click="zenMode = false">
+          Press Ctrl+K Z to exit Zen Mode
+        </div>
+      </Transition>
+
       <!-- Editor context menu -->
       <ContextMenu
         v-if="editorContextMenu.visible"
@@ -1151,21 +1320,21 @@ onBeforeUnmount(() => {
         @select="handleEditorContextSelect"
       />
 
-      <!-- Command palette -->
+      <!-- Command palette / Quick open -->
       <Transition name="cmd-palette">
-        <div v-if="commandPaletteOpen" class="command-palette-overlay" @click="commandPaletteOpen = false">
+        <div v-if="commandPaletteOpen" class="command-palette-overlay" @click="commandPaletteOpen = false; commandPaletteMode = 'commands'">
           <div class="command-palette" @click.stop>
             <div class="command-palette__input-row">
-              <span class="codicon codicon-search"></span>
+              <span class="codicon" :class="commandPaletteMode === 'files' ? 'codicon-go-to-file' : 'codicon-search'"></span>
               <input
                 ref="commandPaletteInputRef"
                 v-model="commandPaletteQuery"
                 class="command-palette__input"
-                :placeholder="t('commandPalette') + '...'"
+                :placeholder="commandPaletteMode === 'files' ? 'Search files by name...' : (t('commandPalette') + '...')"
                 @keydown="handleCommandPaletteKeydown"
                 autofocus
               />
-              <button class="command-palette__close codicon codicon-close" @click="commandPaletteOpen = false"></button>
+              <button class="command-palette__close codicon codicon-close" @click="commandPaletteOpen = false; commandPaletteMode = 'commands'"></button>
             </div>
             <div class="command-palette__list">
               <template v-for="(item, index) in commandPaletteItems" :key="item.id || `sep-${index}`">
@@ -1179,12 +1348,32 @@ onBeforeUnmount(() => {
                 >
                   <span v-if="item.icon" class="command-palette__icon" :class="item.icon"></span>
                   <span class="command-palette__label">{{ item.label }}</span>
+                  <span v-if="item.detail" class="command-palette__detail">{{ item.detail }}</span>
                   <span v-if="item.shortcut" class="command-palette__shortcut">{{ item.shortcut }}</span>
                 </button>
               </template>
               <div v-if="!commandPaletteItems.some(i => !i.separator)" class="command-palette__empty">
                 {{ t('noResults') || 'No matching commands' }}
               </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- Go to Line dialog -->
+      <Transition name="cmd-palette">
+        <div v-if="goToLineOpen" class="command-palette-overlay" @click="goToLineOpen = false">
+          <div class="command-palette" style="width: 360px" @click.stop>
+            <div class="command-palette__input-row">
+              <span class="codicon codicon-go-to-line"></span>
+              <input
+                v-model="goToLineValue"
+                class="command-palette__input"
+                placeholder="Line:Column (e.g. 42:5)"
+                @keydown="handleGoToLineKeydown"
+                autofocus
+              />
+              <button class="command-palette__close codicon codicon-close" @click="goToLineOpen = false"></button>
             </div>
           </div>
         </div>

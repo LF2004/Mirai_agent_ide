@@ -201,6 +201,48 @@ function registerIpcHandlers() {
   ipcMain.handle('terminal:focus', async (_, payload) => {
     return terminalTools.focusTerminal(payload.terminalId);
   });
+
+  // ===== File watcher =====
+  let fileWatcher = null;
+  let watchDebounceTimer = null;
+
+  ipcMain.handle('workspace:watch', async (_, payload) => {
+    // Clean up existing watcher
+    if (fileWatcher) {
+      fileWatcher.close();
+      fileWatcher = null;
+    }
+
+    const watchPath = payload?.workspacePath;
+    if (!watchPath) return { ok: false };
+
+    try {
+      fileWatcher = fs.watch(watchPath, { recursive: true }, (eventType, filename) => {
+        // Debounce rapid changes
+        if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
+        watchDebounceTimer = setTimeout(() => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('workspace:file-changed', {
+              eventType,
+              filename,
+              path: filename ? path.join(watchPath, filename) : watchPath
+            });
+          }
+        }, 300);
+      });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('workspace:unwatch', async () => {
+    if (fileWatcher) {
+      fileWatcher.close();
+      fileWatcher = null;
+    }
+    return { ok: true };
+  });
 }
 
 app.whenReady().then(async () => {

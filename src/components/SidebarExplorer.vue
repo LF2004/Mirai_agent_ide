@@ -40,7 +40,8 @@ const emit = defineEmits([
   'rename-node',
   'delete-node',
   'inline-confirm',
-  'inline-cancel'
+  'inline-cancel',
+  'find-in-folder'
 ]);
 
 const explorerExpanded = ref(true);
@@ -48,6 +49,7 @@ const recentExpanded = ref(true);
 const contextMenu = ref(null);
 const rootInlineInputRef = ref(null);
 const rootInlineValue = ref('');
+const fileFilter = ref('');
 const hasWorkspace = computed(() => Boolean(props.workspacePath));
 
 // Root-level inline edit: when creating at workspace root (targetPath is empty)
@@ -111,6 +113,10 @@ function runContextAction(action) {
     emit('select-node', { type: 'reveal', path: fullPath });
   }
 
+  if (action === 'find-in-folder') {
+    emit('find-in-folder', node.path);
+  }
+
   if (action === 'rename') {
     emit('rename-node', node);
   }
@@ -172,6 +178,14 @@ onBeforeUnmount(() => {
       </button>
 
       <div v-if="explorerExpanded" class="file-tree">
+        <div v-if="hasWorkspace" class="file-tree__filter">
+          <input
+            v-model="fileFilter"
+            class="file-tree__filter-input"
+            :placeholder="t('searchFiles') + '...'"
+          />
+          <span v-if="fileFilter" class="codicon codicon-close file-tree__filter-clear" @click="fileFilter = ''"></span>
+        </div>
         <template v-if="tree?.children?.length || isRootInlineEdit">
           <div v-if="isRootInlineEdit" class="tree-node tree-node--inline-root">
             <div class="tree-node__label tree-node__label--inline">
@@ -249,6 +263,10 @@ onBeforeUnmount(() => {
         {{ t('openToSide') }}
       </button>
       <div class="context-menu__separator"></div>
+      <button v-if="contextMenu.node.type === 'directory'" @click="runContextAction('find-in-folder')">
+        <span class="codicon codicon-search"></span>
+        {{ t('findInFolder') || 'Find in Folder' }}
+      </button>
       <button @click="runContextAction('copy-path')">
         <span class="codicon codicon-clippy"></span>
         {{ t('copyPath') }}

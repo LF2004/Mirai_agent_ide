@@ -15,9 +15,11 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['select', 'close', 'close-others', 'close-all', 'close-saved', 'reveal-in-explorer', 'copy-path', 'copy-relative-path']);
+const emit = defineEmits(['select', 'close', 'close-others', 'close-all', 'close-saved', 'reveal-in-explorer', 'copy-path', 'copy-relative-path', 'reorder']);
 
 const contextMenu = ref({ visible: false, x: 0, y: 0, filePath: '' });
+const dragIndex = ref(-1);
+const dragOverIndex = ref(-1);
 
 function iconStyle(name) {
   const icon = resolveSetiIcon(name);
@@ -56,20 +58,60 @@ const contextMenuItems = computed(() => [
 function handleContextSelect(item) {
   item.action?.();
 }
+
+// ===== Drag and drop tab reordering =====
+function onDragStart(event, index) {
+  dragIndex.value = index;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', String(index));
+}
+
+function onDragOver(event, index) {
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  dragOverIndex.value = index;
+}
+
+function onDrop(event, index) {
+  event.preventDefault();
+  const fromIndex = dragIndex.value;
+  if (fromIndex === -1 || fromIndex === index) {
+    dragIndex.value = -1;
+    dragOverIndex.value = -1;
+    return;
+  }
+  emit('reorder', { from: fromIndex, to: index });
+  dragIndex.value = -1;
+  dragOverIndex.value = -1;
+}
+
+function onDragEnd() {
+  dragIndex.value = -1;
+  dragOverIndex.value = -1;
+}
 </script>
 
 <template>
   <div class="editor-tabs">
     <div
-      v-for="file in openFiles"
+      v-for="(file, index) in openFiles"
       :key="file.path"
       class="editor-tab"
-      :class="{ 'is-active': file.path === activeFilePath }"
+      :class="{
+        'is-active': file.path === activeFilePath,
+        'is-dragging': dragIndex === index,
+        'is-drag-over': dragOverIndex === index && dragIndex !== index
+      }"
+      draggable="true"
+      @dragstart="onDragStart($event, index)"
+      @dragover="onDragOver($event, index)"
+      @drop="onDrop($event, index)"
+      @dragend="onDragEnd"
       @contextmenu="onContextMenu($event, file)"
     >
       <button class="editor-tab__label" @click="$emit('select', file.path)">
         <span class="editor-tab__icon seti-icon" :style="iconStyle(file.name)"></span>
-        <span class="editor-tab__name">{{ file.name }}</span>
+        <span class="editor-tab__name" :class="{ 'is-dirty': file.dirty }">{{ file.name }}</span>
         <span v-if="file.dirty" class="editor-tab__dirty"></span>
       </button>
       <button class="editor-tab__close codicon codicon-close" @click="$emit('close', file.path)"></button>
