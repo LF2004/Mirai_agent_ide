@@ -20,7 +20,8 @@ export const definition = {
 
 export async function execute(args, context) {
   const workspacePath = context?.workspacePath || '';
-  const dirPath = resolveFilePath(args.path || '', workspacePath);
+  const requestedPath = String(args.path || '').trim();
+  const dirPath = requestedPath ? resolveFilePath(requestedPath, workspacePath) : '.';
   if (!dirPath) return formatError('Invalid path');
   const fullPath = path.join(workspacePath, dirPath);
   if (!fs.existsSync(fullPath)) return formatError(`Directory not found: ${args.path}`);

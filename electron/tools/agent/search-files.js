@@ -22,7 +22,8 @@ export const definition = {
 
 export async function execute(args, context) {
   const workspacePath = context?.workspacePath || '';
-  const searchDir = resolveFilePath(args.path || '', workspacePath);
+  const requestedPath = String(args.path || '').trim();
+  const searchDir = requestedPath ? resolveFilePath(requestedPath, workspacePath) : '.';
   if (!searchDir) return formatError('Invalid search path');
   try {
     const results = await grepRecursive(

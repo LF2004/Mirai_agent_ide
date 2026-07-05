@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { ProxyAgent } from 'undici';
 import { getToolDefinitions, executeTool as executeToolEngine } from '../tools/agent/index.js';
 import { buildSystemPrompt } from '../prompts/prompt-manager.js';
 
@@ -20,6 +22,8 @@ const TOOL_TIMEOUT_MS = 30000;
 const TOOL_RETRY_COUNT = 1;
 const CIRCUIT_BREAKER_THRESHOLD = 3;
 const CIRCUIT_BREAKER_COOLDOWN_MS = 60000;
+const PROXY_ENV_KEYS = ['CURSOR_RELAY_OUTBOUND_PROXY', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy'];
+const WRITE_TOOL_NAMES = new Set(['write_file', 'create_file', 'delete_file', 'run_command']);
 
 // Explicit state machine constants
 const SESSION_STATUS = {
@@ -113,6 +117,285 @@ function safeParseJSON(value, defaultValue = {}) {
   }
 }
 
+function buildOpenAIInputMessages(messages) {
+  return messages.map((message) => {
+    if (message.role === 'tool') {
+      return {
+        role: 'tool',
+        content: message.content || '',
+        tool_call_id: message.tool_call_id
+      };
+    }
+
+    const content = message.tool_calls?.length
+      ? [
+          ...(message.content ? [{ type: 'text', text: message.content }] : []),
+          ...message.tool_calls.map((tc) => ({
+            type: 'tool_call',
+            id: tc.id,
+            name: tc.function?.name || '',
+            arguments: tc.function?.arguments || ''
+          }))
+        ]
+      : message.content || '';
+
+    const result = {
+      role: message.role,
+      content
+    };
+
+    if (message.tool_calls?.length) {
+      result.tool_calls = message.tool_calls.map((tc) => ({
+        id: tc.id,
+        type: tc.type || 'function',
+        function: {
+          name: tc.function?.name || '',
+          arguments: tc.function?.arguments || ''
+        }
+      }));
+    }
+
+    return result;
+  });
+}
+
+function buildResponsesPayload(model, messages, tools) {
+  const systemMessage = messages.find((m) => m.role === 'system');
+  const inputMessages = buildOpenAIInputMessages(messages.filter((m) => m.role !== 'system'));
+  const payload = {
+    model: model.modelId,
+    input: inputMessages,
+    stream: true,
+    max_output_tokens: Number(model.maxOutputTokens) || 4096
+  };
+
+  if (systemMessage?.content) {
+    payload.instructions = systemMessage.content;
+  }
+
+  if (model.reasoningStrength && model.reasoningStrength !== 'none') {
+    payload.reasoning = { effort: model.reasoningStrength };
+  }
+
+  if (tools && tools.length > 0) {
+    payload.tools = tools.map((tool) => ({
+      type: 'function',
+      name: tool.function.name,
+      description: tool.function.description,
+      parameters: tool.function.parameters
+    }));
+  }
+
+  const extraParams = model.extraParamsEnabled ? safeParseJSON(model.extraParams) : {};
+  Object.assign(payload, extraParams);
+  return payload;
+}
+
+function* normalizeResponsesEvent(chunk) {
+  const type = chunk?.type;
+  if (!type) return;
+
+  if (type === 'response.output_text.delta') {
+    const content = chunk.delta || chunk.text || '';
+    if (content) {
+      yield { type: 'text', content };
+    }
+    return;
+  }
+
+  if (type === 'response.reasoning_text.delta') {
+    const content = chunk.delta || chunk.text || '';
+    if (content) {
+      yield { type: 'thinking', content };
+    }
+    return;
+  }
+
+  if (type === 'response.output_item.added') {
+    const item = chunk.item;
+    if (item?.type === 'function_call' || item?.type === 'tool_call') {
+      yield {
+        type: 'tool_call',
+        id: item.id || chunk.item_id || '',
+        name: item.name || '',
+        arguments: item.arguments || ''
+      };
+    }
+    return;
+  }
+
+  if (type === 'response.function_call_arguments.delta') {
+    yield {
+      type: 'tool_call_delta',
+      index: chunk.output_index ?? 0,
+      id: chunk.item_id || '',
+      name: chunk.name || '',
+      arguments: chunk.delta || ''
+    };
+  }
+}
+
+function normalizeProxyUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  if (/^[a-z]+:\/\//i.test(raw)) {
+    return raw;
+  }
+
+  return `http://${raw}`;
+}
+
+function readWindowsSystemProxy() {
+  if (process.platform !== 'win32') {
+    return '';
+  }
+
+  try {
+    const output = execFileSync(
+      'reg',
+      ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyServer'],
+      { encoding: 'utf8', windowsHide: true }
+    );
+
+    const match = output.match(/ProxyServer\s+REG_\w+\s+(.+)/i);
+    if (!match) {
+      return '';
+    }
+
+    const raw = String(match[1] || '').trim();
+    if (!raw) {
+      return '';
+    }
+
+    if (raw.includes('=')) {
+      const pairs = raw.split(';').map((item) => item.trim()).filter(Boolean);
+      const map = new Map();
+      for (const pair of pairs) {
+        const [key, value] = pair.split('=');
+        if (key && value) {
+          map.set(key.trim().toLowerCase(), value.trim());
+        }
+      }
+
+      return normalizeProxyUrl(map.get('https') || map.get('http') || map.values().next().value || '');
+    }
+
+    return normalizeProxyUrl(raw);
+  } catch {
+    return '';
+  }
+}
+
+function detectProxyConfig() {
+  for (const key of PROXY_ENV_KEYS) {
+    const value = String(process.env[key] || '').trim();
+    if (value) {
+      return {
+        enabled: true,
+        url: value,
+        source: key.toLowerCase().includes('cursor') ? 'cursor-env' : 'env'
+      };
+    }
+  }
+
+  const windowsProxy = readWindowsSystemProxy();
+  if (windowsProxy) {
+    return {
+      enabled: true,
+      url: windowsProxy,
+      source: 'windows-registry'
+    };
+  }
+
+  return {
+    enabled: false,
+    url: '',
+    source: 'direct'
+  };
+}
+
+function createProxyDispatcher(proxyConfig) {
+  if (!proxyConfig?.enabled || !proxyConfig.url) {
+    return null;
+  }
+
+  try {
+    return new ProxyAgent(proxyConfig.url);
+  } catch {
+    return null;
+  }
+}
+
+function createSessionSnapshot(session) {
+  return {
+    id: session.id,
+    mode: session.mode || 'agent',
+    status: session.status || SESSION_STATUS.IDLE,
+    createdAt: session.createdAt || Date.now(),
+    updatedAt: Date.now(),
+    title: session.title || 'New Session',
+    messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
+    lastMessageAt: session.messages?.[session.messages.length - 1]?.createdAt || null
+  };
+}
+
+function normalizeSessionMessages(messages = []) {
+  return messages.map((message) => ({
+    role: message.role,
+    content: message.content || '',
+    tool_calls: Array.isArray(message.tool_calls)
+      ? message.tool_calls.map((tc) => ({
+          id: tc.id,
+          type: tc.type || 'function',
+          function: {
+            name: tc.function?.name || '',
+            arguments: tc.function?.arguments || ''
+          }
+        }))
+      : undefined,
+    tool_call_id: message.tool_call_id || undefined,
+    createdAt: message.createdAt || Date.now()
+  }));
+}
+
+function extractWorkflowFromText(text, mode) {
+  const raw = String(text || '').trim();
+  if (!raw) {
+    return null;
+  }
+
+  const match = raw.match(/```json\s*([\s\S]*?)```/i);
+  const candidate = match ? match[1].trim() : raw;
+  try {
+    const parsed = JSON.parse(candidate);
+    const steps = Array.isArray(parsed.steps)
+      ? parsed.steps.map((step, index) => ({
+          id: step.id || `${mode || 'workflow'}-${index + 1}`,
+          title: String(step.title || step.name || `Step ${index + 1}`),
+          detail: String(step.detail || step.description || ''),
+          status: String(step.status || 'pending')
+        }))
+      : [];
+
+    if (!parsed.title && steps.length === 0) {
+      return null;
+    }
+
+    return {
+      title: String(parsed.title || parsed.summary || (mode === 'plan' ? 'Plan' : 'Workflow')),
+      steps,
+      risks: Array.isArray(parsed.risks) ? parsed.risks : [],
+      checkpoints: Array.isArray(parsed.checkpoints) ? parsed.checkpoints : [],
+      raw: parsed
+    };
+  } catch {
+    return null;
+  }
+}
+
 function getCurrentModel(config) {
   if (!config || !Array.isArray(config.models)) return null;
   let model = config.models.find(m => m.id === config.selectedModelId);
@@ -124,6 +407,13 @@ async function fetchWithTimeout(url, options, timeoutMs = LLM_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const upstreamSignal = options?.signal;
+    if (upstreamSignal?.aborted) {
+      controller.abort();
+    } else if (upstreamSignal) {
+      upstreamSignal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+
     const response = await fetch(url, { ...options, signal: controller.signal });
     return response;
   } finally {
@@ -134,28 +424,32 @@ async function fetchWithTimeout(url, options, timeoutMs = LLM_TIMEOUT_MS) {
 /**
  * Call OpenAI-compatible chat completions streaming API
  */
-async function callOpenAIStream(model, messages, tools, signal) {
+async function callOpenAIStream(model, messages, tools, signal, dispatcher = null) {
   const baseUrl = (model.baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
   const endpoint = model.endpoint || '/v1/chat/completions';
   const url = `${baseUrl}${endpoint}`;
 
-  const body = {
-    model: model.modelId,
-    messages,
-    stream: true,
-    max_tokens: Number(model.maxOutputTokens) || 4096
-  };
+  const isResponsesEndpoint = endpoint.includes('responses');
+  const body = isResponsesEndpoint
+    ? buildResponsesPayload(model, messages, tools)
+    : {
+        model: model.modelId,
+        messages,
+        stream: true,
+        max_tokens: Number(model.maxOutputTokens) || 4096
+      };
 
-  const extraParams = model.extraParamsEnabled ? safeParseJSON(model.extraParams) : {};
-  if (model.provider === 'openai' && model.reasoningStrength && model.reasoningStrength !== 'none') {
-    // For reasoning models, map reasoningStrength to effort if supported
-    body.reasoning_effort = model.reasoningStrength;
-  }
-  Object.assign(body, extraParams);
+  if (!isResponsesEndpoint) {
+    const extraParams = model.extraParamsEnabled ? safeParseJSON(model.extraParams) : {};
+    if (model.provider === 'openai' && model.reasoningStrength && model.reasoningStrength !== 'none') {
+      body.reasoning_effort = model.reasoningStrength;
+    }
+    Object.assign(body, extraParams);
 
-  if (tools && tools.length > 0 && endpoint.includes('chat/completions')) {
-    body.tools = tools;
-    body.tool_choice = 'auto';
+    if (tools && tools.length > 0 && endpoint.includes('chat/completions')) {
+      body.tools = tools;
+      body.tool_choice = 'auto';
+    }
   }
 
   const headers = {
@@ -165,11 +459,12 @@ async function callOpenAIStream(model, messages, tools, signal) {
   const customHeaders = model.customHeadersEnabled ? safeParseJSON(model.customHeaders) : {};
   Object.assign(headers, customHeaders);
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
-    signal: signal
+    signal,
+    dispatcher
   });
 
   if (!response.ok) {
@@ -187,7 +482,7 @@ async function callOpenAIStream(model, messages, tools, signal) {
 /**
  * Call Anthropic Messages streaming API
  */
-async function callAnthropicStream(model, messages, tools, signal) {
+async function callAnthropicStream(model, messages, tools, signal, dispatcher = null) {
   const baseUrl = (model.baseUrl || 'https://api.anthropic.com').replace(/\/$/, '');
   const url = `${baseUrl}/v1/messages`;
 
@@ -255,11 +550,12 @@ async function callAnthropicStream(model, messages, tools, signal) {
   const customHeaders = model.customHeadersEnabled ? safeParseJSON(model.customHeaders) : {};
   Object.assign(headers, customHeaders);
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
-    signal: signal
+    signal,
+    dispatcher
   });
 
   if (!response.ok) {
@@ -340,6 +636,10 @@ async function* normalizeStream(chunks, provider) {
       } else if (type === 'message_delta') {
         // stop reason
       }
+    } else if (provider === 'openai-responses') {
+      for (const event of normalizeResponsesEvent(chunk) || []) {
+        yield event;
+      }
     } else {
       // OpenAI format
       const delta = chunk.choices?.[0]?.delta;
@@ -381,6 +681,8 @@ export class AgentService {
     this.activeController = null;
     this.workspacePath = '';
     this.workspaceName = '';
+    this.proxyConfig = detectProxyConfig();
+    this.proxyDispatcher = createProxyDispatcher(this.proxyConfig);
 
     // Circuit breaker state — per session
     this.circuitBreakers = new Map(); // sessionId -> { errors, lastErrorTime, tripped }
@@ -395,6 +697,28 @@ export class AgentService {
         fs.mkdirSync(this.sessionsDir, { recursive: true });
       } catch { /* ignore */ }
     }
+
+    this.log('info', 'Proxy detection complete', this.proxyConfig);
+  }
+
+  getSessionDir(sessionId) {
+    if (!this.sessionsDir || !sessionId) return '';
+    return path.join(this.sessionsDir, sessionId);
+  }
+
+  getSessionStatePath(sessionId) {
+    return path.join(this.getSessionDir(sessionId), 'state.json');
+  }
+
+  getSessionMessagesPath(sessionId) {
+    return path.join(this.getSessionDir(sessionId), 'messages.json');
+  }
+
+  ensureSessionDir(sessionId) {
+    const dir = this.getSessionDir(sessionId);
+    if (!dir) return '';
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
   }
 
   // ===== Config =====
@@ -434,7 +758,15 @@ export class AgentService {
   }
 
   getDiagnostics() {
-    return [...this.diagnostics];
+    return [
+      {
+        timestamp: new Date().toISOString(),
+        level: 'info',
+        message: 'proxy-status',
+        proxy: this.proxyConfig
+      },
+      ...this.diagnostics
+    ];
   }
 
   // ===== Circuit Breaker =====
@@ -487,17 +819,11 @@ export class AgentService {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     try {
-      const filePath = path.join(this.sessionsDir, `${sessionId}.json`);
-      const data = {
-        id: session.id,
-        mode: session.mode,
-        messages: session.messages,
-        status: session.status,
-        createdAt: session.createdAt,
-        updatedAt: Date.now(),
-        title: session.title || (session.messages[0]?.content?.slice(0, 60) || 'New Session')
-      };
-      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+      this.ensureSessionDir(sessionId);
+      const snapshot = createSessionSnapshot(session);
+      const messages = normalizeSessionMessages(session.messages);
+      fs.writeFileSync(this.getSessionStatePath(sessionId), JSON.stringify(snapshot, null, 2), 'utf-8');
+      fs.writeFileSync(this.getSessionMessagesPath(sessionId), JSON.stringify(messages, null, 2), 'utf-8');
     } catch (err) {
       this.log('error', `Failed to persist session ${sessionId}: ${err.message}`);
     }
@@ -506,16 +832,19 @@ export class AgentService {
   loadPersistedSession(sessionId) {
     if (!this.sessionsDir) return null;
     try {
-      const filePath = path.join(this.sessionsDir, `${sessionId}.json`);
-      if (!fs.existsSync(filePath)) return null;
-      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      const statePath = this.getSessionStatePath(sessionId);
+      const messagesPath = this.getSessionMessagesPath(sessionId);
+      if (!fs.existsSync(statePath)) return null;
+      const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+      const messages = fs.existsSync(messagesPath) ? JSON.parse(fs.readFileSync(messagesPath, 'utf-8')) : [];
       const session = {
-        id: data.id,
-        mode: data.mode || 'agent',
-        messages: data.messages || [],
+        id: state.id,
+        mode: state.mode || 'agent',
+        messages: Array.isArray(messages) ? messages : [],
         status: 'idle',
-        createdAt: data.createdAt || Date.now(),
-        title: data.title || 'Restored Session'
+        createdAt: state.createdAt || Date.now(),
+        title: state.title || 'Restored Session',
+        updatedAt: state.updatedAt || state.createdAt || Date.now()
       };
       this.sessions.set(sessionId, session);
       return session;
@@ -527,18 +856,21 @@ export class AgentService {
   listPersistedSessions() {
     if (!this.sessionsDir) return [];
     try {
-      const files = fs.readdirSync(this.sessionsDir).filter(f => f.endsWith('.json'));
+      const dirs = fs.readdirSync(this.sessionsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory());
       const sessions = [];
-      for (const file of files) {
+      for (const dir of dirs) {
         try {
-          const data = JSON.parse(fs.readFileSync(path.join(this.sessionsDir, file), 'utf-8'));
+          const statePath = path.join(this.sessionsDir, dir.name, 'state.json');
+          if (!fs.existsSync(statePath)) continue;
+          const data = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
           sessions.push({
             id: data.id,
             mode: data.mode,
             title: data.title || 'Untitled',
-            messageCount: (data.messages || []).length,
+            messageCount: data.messageCount || 0,
             createdAt: data.createdAt,
-            updatedAt: data.updatedAt || data.createdAt
+            updatedAt: data.updatedAt || data.createdAt,
+            status: data.status || 'idle'
           });
         } catch { /* skip */ }
       }
@@ -552,8 +884,8 @@ export class AgentService {
   deletePersistedSession(sessionId) {
     if (!this.sessionsDir) return;
     try {
-      const filePath = path.join(this.sessionsDir, `${sessionId}.json`);
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      const dir = this.getSessionDir(sessionId);
+      if (dir && fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
     } catch { /* ignore */ }
   }
 
@@ -561,14 +893,16 @@ export class AgentService {
 
   createSession(mode = 'agent') {
     const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    this.sessions.set(id, {
+    const session = {
       id,
       mode,
       messages: [],
       status: SESSION_STATUS.IDLE,
       createdAt: Date.now(),
       title: 'New Session'
-    });
+    };
+    this.sessions.set(id, session);
+    this.persistSession(id);
     this.log('info', `Session created: ${id} (mode: ${mode})`);
     return id;
   }
@@ -713,14 +1047,17 @@ export class AgentService {
         });
 
         const provider = model.provider || 'openai';
-        const rawStream = provider === 'anthropic'
-          ? await callAnthropicStream(model, apiMessages, tools, signal)
-          : await callOpenAIStream(model, apiMessages, tools, signal);
+        const streamProvider = provider === 'openai' && String(model.endpoint || '').includes('responses')
+          ? 'openai-responses'
+          : provider;
+        const rawStream = streamProvider === 'anthropic'
+          ? await callAnthropicStream(model, apiMessages, tools, signal, this.proxyDispatcher)
+          : await callOpenAIStream(model, apiMessages, tools, signal, this.proxyDispatcher);
 
         let assistantContent = '';
         const toolCalls = [];
 
-        for await (const event of normalizeStream(parseSSEStream(rawStream, signal), provider)) {
+        for await (const event of normalizeStream(parseSSEStream(rawStream, signal), streamProvider)) {
           if (signal.aborted) break;
 
           if (event.type === 'text') {
@@ -765,7 +1102,15 @@ export class AgentService {
 
         session.messages.push(assistantMessage);
 
-        // No tool calls → turn ended
+        const workflow = extractWorkflowFromText(assistantContent, session.mode);
+        if (workflow && (session.mode === 'plan' || session.mode === 'multitask')) {
+          onEvent({
+            type: 'workflow',
+            mode: session.mode,
+            workflow
+          });
+        }
+
         if (toolCalls.length === 0 || toolCalls.every(tc => !tc?.function?.name)) {
           session.status = SESSION_STATUS.TURN_ENDED;
           session.status = SESSION_STATUS.IDLE;
@@ -799,8 +1144,7 @@ export class AgentService {
 
           // Read-only mode enforcement
           const readOnly = session.mode === 'plan' || session.mode === 'ask';
-          const writeTools = ['write_file', 'create_file', 'delete_file', 'run_command'];
-          if (readOnly && writeTools.includes(tc.function.name)) {
+          if (readOnly && WRITE_TOOL_NAMES.has(tc.function.name)) {
             const result = {
               success: false,
               error: `Tool '${tc.function.name}' is not available in ${session.mode} mode (read-only).`
@@ -852,8 +1196,16 @@ export class AgentService {
       session.status = SESSION_STATUS.ERROR;
       session.status = SESSION_STATUS.IDLE; // reset for next attempt
       if (err.name === 'AbortError') {
-        onEvent({ type: 'done', aborted: true });
-        this.log('info', `sendMessage aborted`, { sessionId, round });
+        const abortedByUser = Boolean(this.activeController?.signal?.aborted || signal?.aborted);
+        if (abortedByUser) {
+          onEvent({ type: 'done', aborted: true });
+          this.log('info', `sendMessage aborted`, { sessionId, round });
+        } else {
+          const message = 'LLM request timed out or was interrupted before completion.';
+          onEvent({ type: 'error', error: message });
+          this.log('error', `sendMessage timeout`, { sessionId, round, error: message });
+          this.recordError(sessionId);
+        }
       } else {
         // Record error for circuit breaker
         const tripped = this.recordError(sessionId);

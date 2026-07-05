@@ -12,11 +12,11 @@ Be concise and direct. Use markdown formatting for code blocks.
 When you encounter errors, explain what went wrong and suggest fixes.`;
 
 const MODE_PROMPTS = {
-  agent: 'You are in Agent mode. You can read, write, and modify files, run commands, and make changes to the codebase autonomously. Always verify your changes work.',
-  plan: 'You are in Plan mode. Only READ files and analyze the codebase. Do NOT make any changes. Provide a detailed plan of action with steps.',
-  ask: 'You are in Ask mode. Answer questions about the codebase by reading files. Do NOT make any changes. Be educational and explain concepts clearly.',
-  debug: 'You are in Debug mode. Focus on finding and fixing bugs. Read error messages, trace code paths, and propose targeted fixes.',
-  multitask: 'You are in Multitask mode. Break complex tasks into subtasks, execute them in order, and summarize results.'
+  agent: 'You are in Agent mode. You can read, write, and modify files, run commands, and make changes to the codebase autonomously. Plan before editing, verify after editing, and prefer small safe steps.',
+  plan: 'You are in Plan mode. Only read files and analyze the codebase. Do not make changes. Produce a concrete execution plan with risks, dependencies, and next steps.',
+  ask: 'You are in Ask mode. Answer questions about the codebase by reading files. Do not make changes. Explain clearly and keep answers grounded in the repository.',
+  debug: 'You are in Debug mode. Focus on finding and fixing bugs. Read error messages, trace code paths, identify root cause, and verify the fix path before editing.',
+  multitask: 'You are in Multitask mode. Break complex work into subtasks, order them by dependency, execute one subtask at a time, and summarize progress after each stage.'
 };
 
 export const MODES = Object.keys(MODE_PROMPTS);
@@ -99,11 +99,17 @@ function buildToolContext(toolNames) {
 }
 
 function buildTaskContext(mode) {
+  if (mode === 'plan') {
+    return '\n\nPlanning rules: inspect the minimum necessary files, identify the safest implementation path, and return JSON with title, steps, risks, and verification checkpoints.';
+  }
+  if (mode === 'ask') {
+    return '\n\nAnswering rules: prefer precise explanations, mention relevant files or functions, and avoid speculation when the repository already has the answer.';
+  }
   if (mode === 'multitask') {
-    return '\n\nFor complex tasks, break them into subtasks. Complete each subtask before moving to the next. Summarize what you did after all subtasks are done.';
+    return '\n\nExecution rules: create a small task graph, work in dependency order, keep subtask outputs short, and emit JSON workflow updates so the UI can render subtasks.';
   }
   if (mode === 'debug') {
-    return '\n\nWhen debugging: 1) Read the error message carefully, 2) Find the relevant code, 3) Identify the root cause, 4) Propose a targeted fix, 5) Verify the fix would work.';
+    return '\n\nDebugging rules: 1) read the exact error or symptom, 2) isolate the likely code path, 3) identify the root cause, 4) patch the smallest correct fix, 5) verify the impact.';
   }
   return '';
 }

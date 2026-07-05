@@ -692,9 +692,9 @@ function cancelInlineEdit() {
   inlineEdit.value = null;
 }
 
-function handleModeChange(mode) {
+async function handleModeChange(mode) {
   workspaceStore.setMode(mode);
-  agentStore.setMode(mode);
+  await agentStore.setMode(mode);
 }
 
 function handleModelChange(model) {

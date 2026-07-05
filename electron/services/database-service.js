@@ -7,6 +7,7 @@ export class DatabaseService {
   constructor(userDataPath) {
     this.userDataPath = userDataPath;
     this.dbFilePath = path.join(userDataPath, 'mirai-agent-ide.db');
+    this.agentConfigFilePath = path.join(userDataPath, 'agent-config.json');
     this.database = null;
   }
 
@@ -112,15 +113,37 @@ export class DatabaseService {
     const row = this.database
       .prepare(`SELECT value FROM settings WHERE key = 'agentConfig'`)
       .get();
-    if (!row) return null;
+    if (!row) {
+      if (fs.existsSync(this.agentConfigFilePath)) {
+        try {
+          return JSON.parse(fs.readFileSync(this.agentConfigFilePath, 'utf-8'));
+        } catch {
+          return null;
+        }
+      }
+      return null;
+    }
     try {
       return JSON.parse(row.value);
     } catch {
+      try {
+        if (fs.existsSync(this.agentConfigFilePath)) {
+          return JSON.parse(fs.readFileSync(this.agentConfigFilePath, 'utf-8'));
+        }
+      } catch {
+        return null;
+      }
       return null;
     }
   }
 
   saveAgentConfig(config) {
+    try {
+      fs.mkdirSync(this.userDataPath, { recursive: true });
+      fs.writeFileSync(this.agentConfigFilePath, JSON.stringify(config, null, 2), 'utf-8');
+    } catch {
+      // ignore file backup failures if SQLite write succeeds
+    }
     return this.saveSetting('agentConfig', config);
   }
 

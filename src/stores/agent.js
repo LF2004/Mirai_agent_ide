@@ -108,8 +108,20 @@ export const useAgentStore = defineStore('agent', {
     // Event listener registered flag
     listenerRegistered: false,
 
+    // In-flight session creation promise to avoid send/abort races
+    sessionInitPromise: null,
+
     // Session history (persisted sessions)
-    sessionHistory: []
+    sessionHistory: [],
+    activeSessionIndex: 0,
+
+    // Lightweight workflow summary for plan/multitask modes
+    workflow: {
+      mode: '',
+      title: '',
+      steps: [],
+      updatedAt: ''
+    }
   }),
 
   getters: {
@@ -142,6 +154,12 @@ export const useAgentStore = defineStore('agent', {
       }
     },
 
+    async reloadConfig() {
+      this.configLoaded = false;
+      await this.loadConfig();
+      return this.config;
+    },
+
     async saveConfig(config) {
       this.config = { ...this.config, ...config };
       try {
@@ -152,42 +170,42 @@ export const useAgentStore = defineStore('agent', {
       }
     },
 
-    addModel(provider) {
+    async addModel(provider) {
       const model = provider === 'anthropic' ? createDefaultAnthropicModel() : createDefaultOpenAIModel();
       this.config.models.push(model);
       this.config.selectedModelId = model.id;
-      this._persistConfig();
+      await this._persistConfig();
       return model;
     },
 
-    updateModel(modelId, patch) {
+    async updateModel(modelId, patch) {
       const idx = this.config.models.findIndex(m => m.id === modelId);
       if (idx >= 0) {
         this.config.models[idx] = { ...this.config.models[idx], ...patch };
-        this._persistConfig();
+        await this._persistConfig();
       }
     },
 
-    deleteModel(modelId) {
+    async deleteModel(modelId) {
       const idx = this.config.models.findIndex(m => m.id === modelId);
       if (idx >= 0) {
         this.config.models.splice(idx, 1);
         if (this.config.selectedModelId === modelId) {
           this.config.selectedModelId = this.config.models[0]?.id || '';
         }
-        this._persistConfig();
+        await this._persistConfig();
       }
     },
 
-    selectModel(modelId) {
+    async selectModel(modelId) {
       this.config.selectedModelId = modelId;
-      this._persistConfig();
+      await this._persistConfig();
     },
 
     // Fire-and-forget persistence helper — converts reactive state to plain
     // object and sends to the backend for SQLite storage.
     _persistConfig() {
-      this.saveConfig(this.config).catch((err) => {
+      return this.saveConfig(this.config).catch((err) => {
         console.error('Failed to persist model config:', err);
       });
     },
@@ -202,15 +220,21 @@ export const useAgentStore = defineStore('agent', {
       }
     },
 
-    ensureSession() {
-      if (!this.sessionId) {
-        // Create session synchronously (the IPC call is async but we set a placeholder)
-        this.sessionId = `pending-${Date.now()}`;
-        desktopApi.agentCreateSession(this.mode).then((id) => {
-          this.sessionId = id;
-        });
+    async ensureSession() {
+      if (this.sessionId) {
+        return this.sessionId;
       }
-      return this.sessionId;
+      if (!this.sessionInitPromise) {
+        this.sessionInitPromise = desktopApi.agentCreateSession(this.mode)
+          .then((id) => {
+            this.sessionId = id;
+            return id;
+          })
+          .finally(() => {
+            this.sessionInitPromise = null;
+          });
+      }
+      return this.sessionInitPromise;
     },
 
     registerEventListener() {
@@ -271,6 +295,9 @@ export const useAgentStore = defineStore('agent', {
           let msg = this.messages.find(m => m.id === this.streamingMessageId);
           if (msg) {
             msg.status = event.aborted ? 'aborted' : 'done';
+            if (event.aborted && !msg.content) {
+              msg.content = '(stopped)';
+            }
           }
           this.isStreaming = false;
           this.streamingMessageId = null;
@@ -294,19 +321,7 @@ export const useAgentStore = defineStore('agent', {
       if (!content.trim() || this.isStreaming) return;
 
       this.registerEventListener();
-      this.ensureSession();
-
-      // Wait for session to be ready
-      if (this.sessionId?.startsWith('pending-')) {
-        await new Promise(resolve => {
-          const check = setInterval(() => {
-            if (!this.sessionId?.startsWith('pending-')) {
-              clearInterval(check);
-              resolve();
-            }
-          }, 50);
-        });
-      }
+      await this.ensureSession();
 
       // Add user message
       const userMsgId = `msg-${Date.now()}-u`;
@@ -357,7 +372,7 @@ export const useAgentStore = defineStore('agent', {
         let msg = this.messages.find(m => m.id === this.streamingMessageId);
         if (msg) {
           msg.status = 'aborted';
-          if (!msg.content) msg.content = '(aborted)';
+          if (!msg.content) msg.content = '(stopped)';
         }
         this.streamingMessageId = null;
       }
@@ -369,6 +384,13 @@ export const useAgentStore = defineStore('agent', {
       }
       this.messages = [];
       this.error = null;
+      this.workflow = {
+        mode: '',
+        title: '',
+        steps: [],
+        updatedAt: ''
+      };
+      this.sessionInitPromise = null;
       if (this.sessionId) {
         try {
           await desktopApi.agentClearSession(this.sessionId);
@@ -376,8 +398,55 @@ export const useAgentStore = defineStore('agent', {
       }
     },
 
-    setMode(mode) {
-      this.mode = mode;
+    async newSession(mode = this.mode) {
+      if (this.isStreaming) {
+        await this.abort();
+      }
+      this.sessionId = null;
+      this.sessionInitPromise = null;
+      this.messages = [];
+      this.error = null;
+      this.workflow = {
+        mode: '',
+        title: '',
+        steps: [],
+        updatedAt: ''
+      };
+      this.mode = String(mode || 'agent');
+      this.sessionId = await desktopApi.agentCreateSession(this.mode);
+      await this.loadSessionHistory();
+      return this.sessionId;
+    },
+
+    async setMode(mode) {
+      const nextMode = String(mode || 'agent');
+      this.mode = nextMode;
+      this.workflow = {
+        mode: nextMode,
+        title: nextMode === 'plan' ? 'Planning workflow' : nextMode === 'multitask' ? 'Task workflow' : '',
+        steps: [],
+        updatedAt: new Date().toISOString()
+      };
+
+      await desktopApi.saveSetting?.({
+        key: 'lastMode',
+        value: nextMode
+      });
+
+      if (this.sessionId) {
+        this.sessionId = null;
+        this.messages = [];
+        this.error = null;
+        this.isStreaming = false;
+        this.streamingMessageId = null;
+        this.sessionInitPromise = null;
+      }
+
+      try {
+        this.sessionId = await desktopApi.agentCreateSession(nextMode);
+      } catch (err) {
+        console.error('Failed to recreate agent session after mode change:', err);
+      }
     },
 
     // ===== Session History =====
@@ -385,6 +454,9 @@ export const useAgentStore = defineStore('agent', {
     async loadSessionHistory() {
       try {
         this.sessionHistory = await desktopApi.agentListSessions();
+        if (!this.sessionHistory.some((s) => s.id === this.sessionId)) {
+          this.activeSessionIndex = 0;
+        }
       } catch (err) {
         console.error('Failed to load session history:', err);
         this.sessionHistory = [];
@@ -404,7 +476,15 @@ export const useAgentStore = defineStore('agent', {
             status: 'done'
           }));
           this.sessionId = sessionId;
+          this.sessionInitPromise = null;
           this.mode = result.session.mode || 'agent';
+          this.activeSessionIndex = Math.max(0, this.sessionHistory.findIndex((s) => s.id === sessionId));
+          this.workflow = {
+            mode: this.mode,
+            title: result.session.title || '',
+            steps: [],
+            updatedAt: new Date().toISOString()
+          };
           return true;
         }
         return false;
@@ -421,10 +501,21 @@ export const useAgentStore = defineStore('agent', {
         if (this.sessionId === sessionId) {
           this.sessionId = null;
           this.messages = [];
+          this.sessionInitPromise = null;
+          this.activeSessionIndex = 0;
         }
       } catch (err) {
         console.error('Failed to delete session:', err);
       }
+    },
+
+    async switchSession(sessionId) {
+      if (!sessionId || sessionId === this.sessionId) return true;
+      const ok = await this.loadSession(sessionId);
+      if (ok) {
+        await this.loadSessionHistory();
+      }
+      return ok;
     },
 
     async getDiagnostics() {
@@ -442,6 +533,15 @@ export const useAgentStore = defineStore('agent', {
       if (tc) {
         tc.expanded = !tc.expanded;
       }
+    },
+
+    setWorkflow(workflow) {
+      this.workflow = {
+        mode: workflow?.mode || this.mode,
+        title: workflow?.title || '',
+        steps: Array.isArray(workflow?.steps) ? workflow.steps : [],
+        updatedAt: workflow?.updatedAt || new Date().toISOString()
+      };
     }
   }
 });

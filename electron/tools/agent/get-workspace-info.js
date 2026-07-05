@@ -23,7 +23,7 @@ export async function execute(_args, context) {
       .join('\n');
     return {
       success: true,
-      result: `Workspace: ${path.basename(workspacePath)}\nPath: ${workspacePath}\n\nTop-level:\n${topFiles}`
+      result: `Workspace: ${path.basename(workspacePath)}\nPath: ${workspacePath}\n\nTop-level:\n${topFiles || '(empty)'}`
     };
   } catch (err) {
     return formatError(err.message || String(err));
