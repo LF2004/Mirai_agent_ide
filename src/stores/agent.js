@@ -3,22 +3,86 @@ import { getDesktopApi } from '../services/desktop.js';
 
 const desktopApi = getDesktopApi();
 
+function generateId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function createDefaultOpenAIModel() {
+  return {
+    id: generateId(),
+    provider: 'openai',
+    displayName: 'OpenAI - GPT-4o',
+    modelId: 'gpt-4o',
+    apiKey: '',
+    baseUrl: 'https://api.openai.com/v1',
+    contextWindow: 128000,
+    maxOutputTokens: 4096,
+    reasoningStrength: 'medium',
+    endpoint: '/v1/chat/completions',
+    extraParams: {},
+    customHeaders: {},
+    extraParamsEnabled: false,
+    customHeadersEnabled: false,
+    notes: ''
+  };
+}
+
+function createDefaultAnthropicModel() {
+  return {
+    id: generateId(),
+    provider: 'anthropic',
+    displayName: 'Anthropic - Claude 3.5 Sonnet',
+    modelId: 'claude-3-5-sonnet-20241022',
+    apiKey: '',
+    baseUrl: 'https://api.anthropic.com',
+    contextWindow: 200000,
+    maxOutputTokens: 8192,
+    thinkingStrength: 'medium',
+    extraParams: {},
+    customHeaders: {},
+    extraParamsEnabled: false,
+    customHeadersEnabled: false,
+    notes: ''
+  };
+}
+
+function migrateLegacyConfig(cfg) {
+  // Migrate from old flat config to new model array
+  if (cfg && cfg.models && Array.isArray(cfg.models)) {
+    return cfg;
+  }
+  if (cfg && cfg.apiKey) {
+    const isAnthropic = cfg.baseUrl?.includes('anthropic') || cfg.model?.startsWith('claude');
+    const model = isAnthropic ? createDefaultAnthropicModel() : createDefaultOpenAIModel();
+    model.displayName = cfg.model || model.modelId;
+    model.modelId = cfg.model || model.modelId;
+    model.apiKey = cfg.apiKey || '';
+    model.baseUrl = cfg.baseUrl || model.baseUrl;
+    model.maxOutputTokens = cfg.maxTokens || model.maxOutputTokens;
+    return {
+      selectedModelId: model.id,
+      models: [model]
+    };
+  }
+  const defaultModel = createDefaultOpenAIModel();
+  return {
+    selectedModelId: defaultModel.id,
+    models: [defaultModel]
+  };
+}
+
 export const useAgentStore = defineStore('agent', {
   state: () => ({
     // Configuration
     config: {
-      apiKey: '',
-      baseUrl: 'https://api.openai.com/v1',
-      model: 'gpt-4o',
-      temperature: 0.7,
-      maxTokens: 4096
+      selectedModelId: '',
+      models: []
     },
     configLoaded: false,
 
     // Session
     sessionId: null,
     mode: 'agent',
-    model: 'gpt-4o',
 
     // Messages — each message is:
     // { id, role: 'user'|'assistant', content: string, toolCalls: [], status: 'streaming'|'done'|'error' }
@@ -36,7 +100,10 @@ export const useAgentStore = defineStore('agent', {
   }),
 
   getters: {
-    hasConfig: (state) => Boolean(state.config.apiKey),
+    hasConfig: (state) => state.config.models.some(m => Boolean(m.apiKey)),
+    currentModel: (state) => {
+      return state.config.models.find(m => m.id === state.config.selectedModelId) || state.config.models[0] || null;
+    },
     canSend: (state) => !state.isStreaming,
     messageCount: (state) => state.messages.length
   },
@@ -46,10 +113,19 @@ export const useAgentStore = defineStore('agent', {
       if (this.configLoaded) return;
       try {
         const cfg = await desktopApi.agentGetConfig();
-        this.config = { ...this.config, ...cfg };
+        this.config = migrateLegacyConfig(cfg);
+        if (!this.config.selectedModelId && this.config.models.length > 0) {
+          this.config.selectedModelId = this.config.models[0].id;
+        }
         this.configLoaded = true;
       } catch (err) {
         console.error('Failed to load agent config:', err);
+        const defaultModel = createDefaultOpenAIModel();
+        this.config = {
+          selectedModelId: defaultModel.id,
+          models: [defaultModel]
+        };
+        this.configLoaded = true;
       }
     },
 
@@ -59,6 +135,44 @@ export const useAgentStore = defineStore('agent', {
         await desktopApi.agentSetConfig(this.config);
       } catch (err) {
         console.error('Failed to save agent config:', err);
+      }
+    },
+
+    addModel(provider) {
+      const model = provider === 'anthropic' ? createDefaultAnthropicModel() : createDefaultOpenAIModel();
+      this.config.models.push(model);
+      this.config.selectedModelId = model.id;
+      return model;
+    },
+
+    updateModel(modelId, patch) {
+      const idx = this.config.models.findIndex(m => m.id === modelId);
+      if (idx >= 0) {
+        this.config.models[idx] = { ...this.config.models[idx], ...patch };
+      }
+    },
+
+    deleteModel(modelId) {
+      const idx = this.config.models.findIndex(m => m.id === modelId);
+      if (idx >= 0) {
+        this.config.models.splice(idx, 1);
+        if (this.config.selectedModelId === modelId) {
+          this.config.selectedModelId = this.config.models[0]?.id || '';
+        }
+      }
+    },
+
+    selectModel(modelId) {
+      this.config.selectedModelId = modelId;
+    },
+
+    async testModel(model) {
+      // Use a simple non-streaming test call via backend
+      try {
+        const result = await desktopApi.agentTestModel(model);
+        return result;
+      } catch (err) {
+        return { ok: false, error: err.message };
       }
     },
 
@@ -238,12 +352,6 @@ export const useAgentStore = defineStore('agent', {
 
     setMode(mode) {
       this.mode = mode;
-    },
-
-    setModel(model) {
-      this.model = model;
-      // Also update config model
-      this.config.model = model;
     },
 
     toggleToolCallExpand(messageId, toolCallId) {

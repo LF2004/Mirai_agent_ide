@@ -258,6 +258,10 @@ function registerIpcHandlers() {
     return agentService.getConfig();
   });
 
+  ipcMain.handle('agent:test-model', async (_, model) => {
+    return agentService.testModel(model || {});
+  });
+
   ipcMain.handle('agent:create-session', async (_, mode) => {
     return agentService.createSession(mode || 'agent');
   });

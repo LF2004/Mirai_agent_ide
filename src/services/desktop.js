@@ -502,13 +502,29 @@ function buildMockApi() {
     async agentSetConfig() { return { ok: true }; },
     async agentGetConfig() {
       return {
-        apiKey: '',
-        baseUrl: 'https://api.openai.com/v1',
-        model: 'gpt-4o',
-        temperature: 0.7,
-        maxTokens: 4096
+        selectedModelId: 'mock-openai',
+        models: [
+          {
+            id: 'mock-openai',
+            provider: 'openai',
+            displayName: 'OpenAI - GPT-4o',
+            modelId: 'gpt-4o',
+            apiKey: '',
+            baseUrl: 'https://api.openai.com/v1',
+            contextWindow: 128000,
+            maxOutputTokens: 4096,
+            reasoningStrength: 'medium',
+            endpoint: '/v1/chat/completions',
+            extraParams: {},
+            customHeaders: {},
+            extraParamsEnabled: false,
+            customHeadersEnabled: false,
+            notes: ''
+          }
+        ]
       };
     },
+    async agentTestModel() { return { ok: true, response: 'Mock test passed' }; },
     async agentCreateSession() { return 'mock-session'; },
     async agentGetMessages() { return []; },
     async agentClearSession() { return { ok: true }; },

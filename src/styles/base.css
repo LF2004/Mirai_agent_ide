@@ -3158,6 +3158,225 @@ button {
   border-top: 1px solid var(--border);
 }
 
+/* Model config dialog wide layout */
+.agent-config--wide {
+  width: 760px;
+  max-width: 92vw;
+  max-height: 90vh;
+}
+
+.agent-config__layout {
+  display: flex;
+  min-height: 0;
+  max-height: calc(90vh - 110px);
+}
+
+.agent-config__sidebar {
+  width: 200px;
+  border-right: 1px solid var(--border);
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(128, 128, 128, 0.04);
+  flex-shrink: 0;
+  overflow-y: auto;
+}
+
+.agent-config__sidebar-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+.agent-config__provider-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.agent-config__provider-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.agent-config__provider-tab:hover {
+  background: rgba(128, 128, 128, 0.12);
+}
+
+.agent-config__provider-tab.active {
+  background: rgba(77, 141, 255, 0.15);
+  border-color: var(--accent-blue, #4d8dff);
+  color: var(--accent-blue, #4d8dff);
+}
+
+.agent-config__model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-config__model-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text);
+  transition: background 0.15s;
+}
+
+.agent-config__model-item:hover {
+  background: rgba(128, 128, 128, 0.1);
+}
+
+.agent-config__model-item.active {
+  background: rgba(77, 141, 255, 0.12);
+}
+
+.agent-config__model-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-config__model-delete {
+  opacity: 0;
+  transition: opacity 0.15s;
+  color: var(--danger, #f48771);
+}
+
+.agent-config__model-item:hover .agent-config__model-delete {
+  opacity: 1;
+}
+
+.agent-config__body {
+  flex: 1;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.agent-config__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.agent-config__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-soft);
+  font-weight: 500;
+}
+
+.agent-config__label .codicon {
+  font-size: 12px;
+}
+
+.agent-config__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-config__field--toggle {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.agent-config__input-row {
+  display: flex;
+  gap: 4px;
+}
+
+.agent-config__input-row .agent-config__input {
+  flex: 1;
+}
+
+.agent-config__input-row .icon-button {
+  flex-shrink: 0;
+  width: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-config__textarea {
+  resize: vertical;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.agent-config__advanced {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(128, 128, 128, 0.04);
+}
+
+.agent-config__advanced .agent-config__textarea {
+  margin-top: 4px;
+}
+
+.agent-config__test {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  background: rgba(128, 128, 128, 0.04);
+}
+
+.agent-config__test-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.agent-config__test-status {
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+.agent-config__test-status--ok {
+  color: var(--accent-green, #8dc149);
+}
+
+.agent-config__test-status--err {
+  color: var(--danger, #f48771);
+}
+
+.agent-config__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
 /* Fade transition for config dialog */
 .fade-enter-active,
 .fade-leave-active {

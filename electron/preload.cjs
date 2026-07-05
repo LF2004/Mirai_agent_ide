@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('mirai', {
   // Agent APIs
   agentSetConfig: (config) => ipcRenderer.invoke('agent:set-config', config),
   agentGetConfig: () => ipcRenderer.invoke('agent:get-config'),
+  agentTestModel: (model) => ipcRenderer.invoke('agent:test-model', model),
   agentCreateSession: (mode) => ipcRenderer.invoke('agent:create-session', mode),
   agentGetMessages: (sessionId) => ipcRenderer.invoke('agent:get-messages', sessionId),
   agentClearSession: (sessionId) => ipcRenderer.invoke('agent:clear-session', sessionId),

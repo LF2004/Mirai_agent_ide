@@ -7,7 +7,7 @@ import { readWorkspaceFile, writeWorkspaceFile, resolveInsideWorkspace } from '.
  * AgentService — Core Agent engine for Mirai Agent IDE
  *
  * Architecture:
- *   - LLM Client: OpenAI-compatible streaming API (SSE)
+ *   - LLM Client: OpenAI + Anthropic streaming APIs
  *   - Tool Engine: Built-in tools (read/write/list/grep/shell/create/delete)
  *   - Session Manager: Conversation history + context per session
  *   - Agent Loop: State machine (IDLE → PROCESSING → TOOL_CALLING → TURN_ENDED)
@@ -36,9 +36,6 @@ const MAX_TOOL_ROUNDS = 20;
 const LLM_TIMEOUT_MS = 120000;
 const TOOL_TIMEOUT_MS = 30000;
 
-/**
- * Built-in tool definitions (OpenAI function-calling format)
- */
 function getToolDefinitions() {
   return [
     {
@@ -153,9 +150,6 @@ function getToolDefinitions() {
   ];
 }
 
-/**
- * Execute a single tool call
- */
 async function executeTool(toolName, args, workspacePath) {
   try {
     switch (toolName) {
@@ -237,7 +231,6 @@ async function executeTool(toolName, args, workspacePath) {
 function resolveFilePath(inputPath, workspacePath) {
   if (!inputPath) return '';
   const p = String(inputPath).replace(/\\/g, '/');
-  // If absolute and inside workspace, use it
   if (path.isAbsolute(p)) {
     try {
       const resolved = path.resolve(p);
@@ -247,7 +240,6 @@ function resolveFilePath(inputPath, workspacePath) {
       return '';
     }
   }
-  // Relative path — strip leading ./
   return p.replace(/^\.\//, '');
 }
 
@@ -255,9 +247,6 @@ function formatError(message) {
   return { success: false, error: message };
 }
 
-/**
- * Recursive grep using simple regex matching
- */
 async function grepRecursive(dirPath, pattern, glob) {
   const regex = new RegExp(pattern, 'i');
   const results = [];
@@ -323,9 +312,6 @@ function isTextFile(filename) {
   return textExts.includes(ext) || !ext;
 }
 
-/**
- * Run a shell command with timeout
- */
 function runShellCommand(command, cwd) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -343,9 +329,6 @@ function runShellCommand(command, cwd) {
   });
 }
 
-/**
- * Build the system prompt with project context
- */
 function buildSystemPrompt(mode, workspacePath, workspaceName) {
   let prompt = SYSTEM_PROMPT_BASE;
 
@@ -357,7 +340,6 @@ function buildSystemPrompt(mode, workspacePath, workspaceName) {
     prompt += `\n\nCurrent workspace: ${workspaceName || path.basename(workspacePath)}`;
     prompt += `\nWorkspace path: ${workspacePath}`;
 
-    // Try to read AGENTS.md or .cursorrules for project context
     const contextFiles = ['AGENTS.md', '.cursorrules', 'CLAUDE.md'];
     for (const cf of contextFiles) {
       const cfPath = path.join(workspacePath, cf);
@@ -370,7 +352,6 @@ function buildSystemPrompt(mode, workspacePath, workspaceName) {
       }
     }
 
-    // Try to read package.json for project info
     const pkgPath = path.join(workspacePath, 'package.json');
     if (fs.existsSync(pkgPath)) {
       try {
@@ -393,31 +374,71 @@ function buildSystemPrompt(mode, workspacePath, workspaceName) {
   return prompt;
 }
 
+function safeParseJSON(value, defaultValue = {}) {
+  if (!value) return defaultValue;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return defaultValue;
+  }
+}
+
+function getCurrentModel(config) {
+  if (!config || !Array.isArray(config.models)) return null;
+  let model = config.models.find(m => m.id === config.selectedModelId);
+  if (!model) model = config.models[0];
+  return model || null;
+}
+
+async function fetchWithTimeout(url, options, timeoutMs = LLM_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    return response;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
- * Call LLM API with streaming (OpenAI-compatible)
+ * Call OpenAI-compatible chat completions streaming API
  */
-async function callLLMStream(config, messages, tools, signal) {
-  const url = `${config.baseUrl.replace(/\/$/, '')}/chat/completions`;
+async function callOpenAIStream(model, messages, tools, signal) {
+  const baseUrl = (model.baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
+  const endpoint = model.endpoint || '/v1/chat/completions';
+  const url = `${baseUrl}${endpoint}`;
 
   const body = {
-    model: config.model,
-    messages: messages,
+    model: model.modelId,
+    messages,
     stream: true,
-    temperature: config.temperature ?? 0.7,
-    max_tokens: config.maxTokens ?? 4096
+    max_tokens: Number(model.maxOutputTokens) || 4096
   };
 
-  if (tools && tools.length > 0) {
+  const extraParams = model.extraParamsEnabled ? safeParseJSON(model.extraParams) : {};
+  if (model.provider === 'openai' && model.reasoningStrength && model.reasoningStrength !== 'none') {
+    // For reasoning models, map reasoningStrength to effort if supported
+    body.reasoning_effort = model.reasoningStrength;
+  }
+  Object.assign(body, extraParams);
+
+  if (tools && tools.length > 0 && endpoint.includes('chat/completions')) {
     body.tools = tools;
     body.tool_choice = 'auto';
   }
 
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${model.apiKey || ''}`
+  };
+  const customHeaders = model.customHeadersEnabled ? safeParseJSON(model.customHeaders) : {};
+  Object.assign(headers, customHeaders);
+
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.apiKey}`
-    },
+    headers,
     body: JSON.stringify(body),
     signal: signal
   });
@@ -435,8 +456,95 @@ async function callLLMStream(config, messages, tools, signal) {
 }
 
 /**
- * Parse SSE stream from OpenAI-compatible API
+ * Call Anthropic Messages streaming API
  */
+async function callAnthropicStream(model, messages, tools, signal) {
+  const baseUrl = (model.baseUrl || 'https://api.anthropic.com').replace(/\/$/, '');
+  const url = `${baseUrl}/v1/messages`;
+
+  // Convert messages to Anthropic format
+  const anthropicMessages = messages.map(m => {
+    if (m.role === 'system') return null;
+    if (m.role === 'tool') {
+      return {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: m.content }]
+      };
+    }
+    if (m.role === 'assistant' && m.tool_calls) {
+      const content = [];
+      if (m.content) content.push({ type: 'text', text: m.content });
+      for (const tc of m.tool_calls) {
+        content.push({
+          type: 'tool_use',
+          id: tc.id,
+          name: tc.function.name,
+          input: safeParseJSON(tc.function.arguments, {})
+        });
+      }
+      return { role: 'assistant', content };
+    }
+    return { role: m.role, content: m.content };
+  }).filter(Boolean);
+
+  // Extract system message
+  const systemMessage = messages.find(m => m.role === 'system');
+
+  const body = {
+    model: model.modelId,
+    messages: anthropicMessages,
+    max_tokens: Number(model.maxOutputTokens) || 4096,
+    stream: true
+  };
+
+  if (systemMessage) {
+    body.system = systemMessage.content;
+  }
+
+  if (model.thinkingStrength && model.thinkingStrength !== 'none') {
+    const budget = model.thinkingStrength === 'high' ? 16000 : model.thinkingStrength === 'medium' ? 8000 : 4000;
+    body.thinking = { type: 'enabled', budget_tokens: budget };
+  }
+
+  // Anthropic tools format
+  if (tools && tools.length > 0) {
+    body.tools = tools.map(t => ({
+      name: t.function.name,
+      description: t.function.description,
+      input_schema: t.function.parameters
+    }));
+  }
+
+  const extraParams = model.extraParamsEnabled ? safeParseJSON(model.extraParams) : {};
+  Object.assign(body, extraParams);
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'x-api-key': model.apiKey || '',
+    'anthropic-version': '2023-06-01'
+  };
+  const customHeaders = model.customHeadersEnabled ? safeParseJSON(model.customHeaders) : {};
+  Object.assign(headers, customHeaders);
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: signal
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Anthropic API error ${response.status}: ${errText}`);
+  }
+
+  if (!response.body) {
+    throw new Error('No response body from Anthropic API');
+  }
+
+  return response.body;
+}
+
 async function* parseSSEStream(stream, signal) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -476,17 +584,63 @@ async function* parseSSEStream(stream, signal) {
 }
 
 /**
- * AgentService class
+ * Normalize streamed chunks from OpenAI or Anthropic into a common shape
  */
+async function* normalizeStream(chunks, provider) {
+  for await (const chunk of chunks) {
+    if (provider === 'anthropic') {
+      const type = chunk.type;
+      if (type === 'content_block_delta') {
+        const delta = chunk.delta;
+        if (delta && delta.type === 'text_delta') {
+          yield { type: 'text', content: delta.text };
+        } else if (delta && delta.type === 'thinking_delta') {
+          yield { type: 'thinking', content: delta.thinking };
+        }
+      } else if (type === 'content_block_start') {
+        if (chunk.content_block?.type === 'tool_use') {
+          yield {
+            type: 'tool_call',
+            id: chunk.content_block.id,
+            name: chunk.content_block.name,
+            arguments: ''
+          };
+        }
+      } else if (type === 'content_block_stop') {
+        // end of block
+      } else if (type === 'message_delta') {
+        // stop reason
+      }
+    } else {
+      // OpenAI format
+      const delta = chunk.choices?.[0]?.delta;
+      if (!delta) continue;
+
+      if (delta.content) {
+        yield { type: 'text', content: delta.content };
+      }
+
+      if (delta.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          yield {
+            type: 'tool_call_delta',
+            index: tc.index,
+            id: tc.id,
+            name: tc.function?.name,
+            arguments: tc.function?.arguments
+          };
+        }
+      }
+    }
+  }
+}
+
 export class AgentService {
   constructor(databaseService) {
     this.db = databaseService;
     this.config = {
-      apiKey: '',
-      baseUrl: 'https://api.openai.com/v1',
-      model: 'gpt-4o',
-      temperature: 0.7,
-      maxTokens: 4096
+      selectedModelId: '',
+      models: []
     };
     this.sessions = new Map();
     this.activeController = null;
@@ -504,7 +658,7 @@ export class AgentService {
   }
 
   getConfig() {
-    return { ...this.config };
+    return JSON.parse(JSON.stringify(this.config));
   }
 
   createSession(mode = 'agent') {
@@ -547,12 +701,47 @@ export class AgentService {
     }
   }
 
-  /**
-   * Send a message to the agent and stream responses via callback
-   * @param {string} sessionId - Session ID
-   * @param {string} content - User message content
-   * @param {function} onEvent - Callback for events: { type: 'text'|'tool_call'|'tool_result'|'error'|'done', ... }
-   */
+  async testModel(model) {
+    if (!model.apiKey) {
+      return { ok: false, error: 'API key is required' };
+    }
+    if (!model.modelId) {
+      return { ok: false, error: 'Model ID is required' };
+    }
+
+    try {
+      const provider = model.provider || 'openai';
+      const messages = [
+        { role: 'system', content: 'You are a helpful assistant.' },
+        { role: 'user', content: 'Hi, please respond with a short greeting.' }
+      ];
+
+      if (provider === 'anthropic') {
+        const stream = await callAnthropicStream(model, messages, [], null);
+        let text = '';
+        for await (const chunk of parseSSEStream(stream, null)) {
+          const delta = chunk;
+          if (delta.type === 'content_block_delta' && delta.delta?.type === 'text_delta') {
+            text += delta.delta.text;
+          }
+          if (text.length > 50) break;
+        }
+        return { ok: true, response: text.trim() || 'Got response' };
+      } else {
+        const stream = await callOpenAIStream(model, messages, [], null);
+        let text = '';
+        for await (const chunk of parseSSEStream(stream, null)) {
+          const delta = chunk.choices?.[0]?.delta;
+          if (delta?.content) text += delta.content;
+          if (text.length > 50) break;
+        }
+        return { ok: true, response: text.trim() || 'Got response' };
+      }
+    } catch (err) {
+      return { ok: false, error: err.message || String(err) };
+    }
+  }
+
   async sendMessage(sessionId, content, onEvent) {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -560,17 +749,16 @@ export class AgentService {
       return;
     }
 
-    if (!this.config.apiKey) {
-      onEvent({ type: 'error', error: 'API key not configured. Click the settings icon to configure.' });
+    const model = getCurrentModel(this.config);
+    if (!model || !model.apiKey) {
+      onEvent({ type: 'error', error: 'Model not configured. Click the settings icon to add a model.' });
       return;
     }
 
-    // Abort any existing request
     this.abort();
     this.activeController = new AbortController();
     const { signal } = this.activeController;
 
-    // Add user message to session
     session.messages.push({ role: 'user', content });
     session.status = 'processing';
 
@@ -583,54 +771,56 @@ export class AgentService {
 
         if (signal.aborted) break;
 
-        // Build messages for this round
         const systemPrompt = buildSystemPrompt(session.mode, this.workspacePath, this.workspaceName);
         const apiMessages = [
           { role: 'system', content: systemPrompt },
           ...session.messages
         ];
 
-        // Call LLM
-        const stream = await callLLMStream(this.config, apiMessages, tools, signal);
+        const provider = model.provider || 'openai';
+        const rawStream = provider === 'anthropic'
+          ? await callAnthropicStream(model, apiMessages, tools, signal)
+          : await callOpenAIStream(model, apiMessages, tools, signal);
 
-        // Parse streaming response
         let assistantContent = '';
         const toolCalls = [];
-        let currentToolCall = null;
 
-        for await (const chunk of parseSSEStream(stream, signal)) {
+        for await (const event of normalizeStream(parseSSEStream(rawStream, signal), provider)) {
           if (signal.aborted) break;
 
-          const delta = chunk.choices?.[0]?.delta;
-          if (!delta) continue;
-
-          // Text content
-          if (delta.content) {
-            assistantContent += delta.content;
-            onEvent({ type: 'text', content: delta.content });
-          }
-
-          // Tool calls (streaming)
-          if (delta.tool_calls) {
-            for (const tc of delta.tool_calls) {
-              const idx = tc.index;
-              if (!toolCalls[idx]) {
-                toolCalls[idx] = {
-                  id: tc.id || '',
-                  type: 'function',
-                  function: { name: '', arguments: '' }
-                };
+          if (event.type === 'text') {
+            assistantContent += event.content;
+            onEvent({ type: 'text', content: event.content });
+          } else if (event.type === 'thinking') {
+            // Thinking tokens — stream as italic placeholder
+            onEvent({ type: 'text', content: event.content });
+          } else if (event.type === 'tool_call') {
+            toolCalls.push({
+              id: event.id,
+              type: 'function',
+              function: { name: event.name, arguments: event.arguments }
+            });
+            onEvent({ type: 'tool_call', id: event.id, name: event.name, arguments: event.arguments });
+          } else if (event.type === 'tool_call_delta') {
+            const idx = event.index;
+            if (!toolCalls[idx]) {
+              toolCalls[idx] = {
+                id: event.id || '',
+                type: 'function',
+                function: { name: '', arguments: '' }
+              };
+              if (event.id) {
+                onEvent({ type: 'tool_call', id: event.id, name: '', arguments: '' });
               }
-              if (tc.id) toolCalls[idx].id = tc.id;
-              if (tc.function?.name) toolCalls[idx].function.name += tc.function.name;
-              if (tc.function?.arguments) toolCalls[idx].function.arguments += tc.function.arguments;
             }
+            if (event.id) toolCalls[idx].id = event.id;
+            if (event.name) toolCalls[idx].function.name += event.name;
+            if (event.arguments) toolCalls[idx].function.arguments += event.arguments;
           }
         }
 
         if (signal.aborted) break;
 
-        // Build assistant message for session
         const assistantMessage = { role: 'assistant' };
         if (assistantContent) {
           assistantMessage.content = assistantContent;
@@ -641,14 +831,12 @@ export class AgentService {
 
         session.messages.push(assistantMessage);
 
-        // If no tool calls, we're done
         if (toolCalls.length === 0 || toolCalls.every(tc => !tc?.function?.name)) {
           session.status = 'idle';
           onEvent({ type: 'done' });
           return;
         }
 
-        // Execute tool calls
         for (const tc of toolCalls) {
           if (!tc?.function?.name) continue;
           if (signal.aborted) break;
@@ -667,7 +855,6 @@ export class AgentService {
             // keep empty args
           }
 
-          // In plan/ask mode, only allow read-only tools
           const readOnly = session.mode === 'plan' || session.mode === 'ask';
           const writeTools = ['write_file', 'create_file', 'delete_file', 'run_command'];
           if (readOnly && writeTools.includes(tc.function.name)) {
@@ -698,7 +885,6 @@ export class AgentService {
 
         if (signal.aborted) break;
 
-        // Loop continues — LLM will process tool results
         onEvent({ type: 'round_end', round });
       }
 

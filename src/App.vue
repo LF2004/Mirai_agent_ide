@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import SidebarExplorer from './components/SidebarExplorer.vue';
 import EditorTabs from './components/EditorTabs.vue';
@@ -655,7 +655,7 @@ function handleModeChange(mode) {
 
 function handleModelChange(model) {
   workspaceStore.setModel(model);
-  agentStore.setModel(model);
+  agentStore.selectModel(model);
 }
 
 function handleEditorChange(value) {
@@ -993,7 +993,7 @@ onMounted(async () => {
   // Load agent config and sync workspace
   agentStore.loadConfig();
   agentStore.setMode(activeMode.value);
-  agentStore.setModel(selectedModel.value);
+  agentStore.selectModel(selectedModel.value);
   if (workspacePath.value) {
     desktopApi.agentSetWorkspace?.(workspacePath.value, workspaceName.value);
   }

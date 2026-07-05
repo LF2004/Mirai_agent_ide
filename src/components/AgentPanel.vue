@@ -10,7 +10,7 @@ const props = defineProps({
   },
   model: {
     type: String,
-    default: 'gpt-4o'
+    default: ''
   },
   currentFile: {
     type: String,
@@ -29,24 +29,10 @@ const agentStore = useAgentStore();
 const input = ref('');
 const messageListRef = ref(null);
 const showConfig = ref(false);
-const configForm = ref({
-  apiKey: '',
-  baseUrl: 'https://api.openai.com/v1',
-  model: 'gpt-4o',
-  temperature: 0.7,
-  maxTokens: 4096
-});
-
-const models = [
-  { value: 'gpt-4o', label: 'GPT-4o' },
-  { value: 'gpt-4o-mini', label: 'GPT-4o mini' },
-  { value: 'gpt-4.1', label: 'GPT-4.1' },
-  { value: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet' },
-  { value: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku' },
-  { value: 'deepseek-chat', label: 'DeepSeek Chat' },
-  { value: 'deepseek-coder', label: 'DeepSeek Coder' },
-  { value: 'custom', label: 'Custom...' }
-];
+const editingModel = ref(null);
+const testingModel = ref(false);
+const testResult = ref(null);
+const showApiKeyMap = ref({});
 
 const modes = [
   { value: 'agent', label: 'Agent', icon: 'codicon-robot' },
@@ -55,9 +41,23 @@ const modes = [
   { value: 'debug', label: 'Debug', icon: 'codicon-bug' }
 ];
 
+const strengthOptions = [
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'none', label: '无' }
+];
+
+const endpointOptions = [
+  { value: '/v1/chat/completions', label: '/v1/chat/completions' },
+  { value: '/v1/responses', label: '/v1/responses' }
+];
+
 const isStreaming = computed(() => agentStore.isStreaming);
 const messages = computed(() => agentStore.messages);
 const hasConfig = computed(() => agentStore.hasConfig);
+const currentModel = computed(() => agentStore.currentModel);
+const modelsList = computed(() => agentStore.config.models);
 
 function scrollToBottom() {
   nextTick(() => {
@@ -69,18 +69,22 @@ function scrollToBottom() {
 
 watch(messages, () => scrollToBottom(), { deep: true });
 
+watch(() => props.model, (newId) => {
+  if (newId && agentStore.config.selectedModelId !== newId) {
+    agentStore.selectModel(newId);
+  }
+}, { immediate: true });
+
 async function handleSend() {
   const value = input.value.trim();
   if (!value || isStreaming.value) return;
 
-  // Ensure config is loaded
   if (!agentStore.configLoaded) {
     await agentStore.loadConfig();
   }
 
-  // If no API key, open config dialog
   if (!agentStore.hasConfig) {
-    showConfig.value = true;
+    openConfig();
     return;
   }
 
@@ -104,24 +108,138 @@ async function handleNewChat() {
   await agentStore.clearChat();
 }
 
+function handleModelSelect(event) {
+  const modelId = event.target.value;
+  agentStore.selectModel(modelId);
+  emit('model-change', modelId);
+}
+
+function cloneModel(model) {
+  return JSON.parse(JSON.stringify(model));
+}
+
+function createEmptyModel(provider) {
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  if (provider === 'anthropic') {
+    return {
+      id,
+      provider: 'anthropic',
+      displayName: 'Anthropic - Claude 3.5 Sonnet',
+      modelId: 'claude-3-5-sonnet-20241022',
+      apiKey: '',
+      baseUrl: 'https://api.anthropic.com',
+      contextWindow: 200000,
+      maxOutputTokens: 8192,
+      thinkingStrength: 'medium',
+      extraParams: '',
+      customHeaders: '',
+      extraParamsEnabled: false,
+      customHeadersEnabled: false,
+      notes: ''
+    };
+  }
+  return {
+    id,
+    provider: 'openai',
+    displayName: 'OpenAI - GPT-4o',
+    modelId: 'gpt-4o',
+    apiKey: '',
+    baseUrl: 'https://api.openai.com/v1',
+    contextWindow: 128000,
+    maxOutputTokens: 4096,
+    reasoningStrength: 'medium',
+    endpoint: '/v1/chat/completions',
+    extraParams: '',
+    customHeaders: '',
+    extraParamsEnabled: false,
+    customHeadersEnabled: false,
+    notes: ''
+  };
+}
+
+function normalizeModelForm(form) {
+  const m = { ...form };
+  m.contextWindow = Number(m.contextWindow) || 0;
+  m.maxOutputTokens = Number(m.maxOutputTokens) || 0;
+  if (!m.extraParamsEnabled) {
+    m.extraParams = '';
+  }
+  if (!m.customHeadersEnabled) {
+    m.customHeaders = '';
+  }
+  return m;
+}
+
 async function openConfig() {
-  // Load current config into form
   if (!agentStore.configLoaded) {
     await agentStore.loadConfig();
   }
-  configForm.value = { ...agentStore.config };
-  // Sync model dropdown
-  if (!models.find(m => m.value === configForm.value.model)) {
-    configForm.value.model = configForm.value.model || 'gpt-4o';
-  }
+  const model = agentStore.currentModel;
+  editingModel.value = model ? cloneModel(model) : createEmptyModel('openai');
   showConfig.value = true;
+  testResult.value = null;
 }
 
-async function saveConfig() {
-  await agentStore.saveConfig(configForm.value);
-  // Update model selection
-  emit('model-change', configForm.value.model);
-  showConfig.value = false;
+function selectModelToEdit(model) {
+  // Save current edits before switching
+  if (editingModel.value) {
+    agentStore.updateModel(editingModel.value.id, normalizeModelForm(editingModel.value));
+  }
+  agentStore.selectModel(model.id);
+  editingModel.value = cloneModel(model);
+  testResult.value = null;
+}
+
+function addModel(provider) {
+  const model = agentStore.addModel(provider);
+  editingModel.value = cloneModel(model);
+  testResult.value = null;
+}
+
+function deleteModel(model) {
+  if (!confirm(`确定要删除模型 "${model.displayName}" 吗？`)) return;
+  agentStore.deleteModel(model.id);
+  editingModel.value = agentStore.currentModel ? cloneModel(agentStore.currentModel) : null;
+  if (agentStore.currentModel) {
+    emit('model-change', agentStore.currentModel.id);
+  }
+}
+
+function setProvider(provider) {
+  if (!editingModel.value) return;
+  const id = editingModel.value.id;
+  const displayName = editingModel.value.displayName;
+  const base = createEmptyModel(provider);
+  base.id = id;
+  base.displayName = displayName;
+  editingModel.value = base;
+}
+
+async function saveConfig(testAfterSave = false) {
+  if (!editingModel.value) return;
+  const model = normalizeModelForm(editingModel.value);
+  agentStore.updateModel(model.id, model);
+  agentStore.selectModel(model.id);
+  await agentStore.saveConfig(agentStore.config);
+  emit('model-change', model.id);
+
+  if (testAfterSave) {
+    await runTest(model);
+  } else {
+    showConfig.value = false;
+  }
+}
+
+async function runTest(model) {
+  testingModel.value = true;
+  testResult.value = null;
+  const result = await agentStore.testModel(model);
+  testResult.value = result;
+  testingModel.value = false;
+}
+
+function toggleShowApiKey(modelId) {
+  showApiKeyMap.value[modelId] = !showApiKeyMap.value[modelId];
 }
 
 function toggleToolCall(messageId, toolCallId) {
@@ -142,7 +260,6 @@ function formatToolResult(result) {
   if (result.success) {
     const r = result.result;
     if (typeof r === 'string') {
-      // Truncate very long results
       if (r.length > 2000) return r.slice(0, 2000) + '\n... (truncated)';
       return r;
     }
@@ -242,8 +359,8 @@ function getToolIcon(toolName) {
       <select :value="mode" class="composer-pill" @change="$emit('mode-change', $event.target.value)">
         <option v-for="m in modes" :key="m.value" :value="m.value">{{ m.label }}</option>
       </select>
-      <select :value="model" class="composer-model" @change="$emit('model-change', $event.target.value)">
-        <option v-for="m in models" :key="m.value" :value="m.value">{{ m.label }}</option>
+      <select :value="currentModel?.id" class="composer-model" @change="handleModelSelect">
+        <option v-for="m in modelsList" :key="m.id" :value="m.id">{{ m.displayName || m.modelId }}</option>
       </select>
     </div>
 
@@ -274,7 +391,7 @@ function getToolIcon(toolName) {
           <span v-else-if="message.status === 'aborted'" class="agent-msg__status agent-msg__status--aborted">aborted</span>
         </div>
 
-        <!-- Message content (markdown-like rendering) -->
+        <!-- Message content -->
         <div v-if="message.content" class="agent-msg__body" v-html="renderMarkdown(message.content)"></div>
 
         <!-- Tool calls -->
@@ -348,70 +465,196 @@ function getToolIcon(toolName) {
       </div>
     </div>
 
-    <!-- Config Dialog -->
+    <!-- Model Config Dialog -->
     <Transition name="fade">
       <div v-if="showConfig" class="agent-config-overlay" @click.self="showConfig = false">
-        <div class="agent-config">
+        <div class="agent-config agent-config--wide">
           <div class="agent-config__header">
-            <strong>LLM API Configuration</strong>
+            <strong>模型编辑</strong>
             <button class="icon-button codicon codicon-close" @click="showConfig = false"></button>
           </div>
-          <div class="agent-config__body">
-            <label class="agent-config__field">
-              <span>API Key</span>
-              <input
-                v-model="configForm.apiKey"
-                type="password"
-                placeholder="sk-..."
-                class="agent-config__input"
-              />
-            </label>
-            <label class="agent-config__field">
-              <span>Base URL</span>
-              <input
-                v-model="configForm.baseUrl"
-                type="text"
-                placeholder="https://api.openai.com/v1"
-                class="agent-config__input"
-              />
-            </label>
-            <label class="agent-config__field">
-              <span>Model</span>
-              <select v-model="configForm.model" class="agent-config__input">
-                <option v-for="m in models" :key="m.value" :value="m.value">{{ m.label }}</option>
-              </select>
-            </label>
-            <div class="agent-config__row">
-              <label class="agent-config__field">
-                <span>Temperature</span>
-                <input
-                  v-model.number="configForm.temperature"
-                  type="number"
-                  min="0"
-                  max="2"
-                  step="0.1"
-                  class="agent-config__input"
-                />
-              </label>
-              <label class="agent-config__field">
-                <span>Max Tokens</span>
-                <input
-                  v-model.number="configForm.maxTokens"
-                  type="number"
-                  min="256"
-                  max="32768"
-                  step="256"
-                  class="agent-config__input"
-                />
-              </label>
+
+          <div v-if="editingModel" class="agent-config__layout">
+            <!-- Left: model list -->
+            <div class="agent-config__sidebar">
+              <div class="agent-config__sidebar-title">新增模型配置</div>
+              <div class="agent-config__provider-tabs">
+                <button class="agent-config__provider-tab" :class="{ active: false }" @click="addModel('openai')">
+                  <span class="codicon codicon-globe"></span> OpenAI
+                </button>
+                <button class="agent-config__provider-tab" :class="{ active: false }" @click="addModel('anthropic')">
+                  <span class="codicon codicon-sparkle"></span> Anthropic
+                </button>
+              </div>
+              <div class="agent-config__model-list">
+                <div
+                  v-for="m in modelsList"
+                  :key="m.id"
+                  class="agent-config__model-item"
+                  :class="{ active: editingModel.id === m.id }"
+                  @click="selectModelToEdit(m)"
+                >
+                  <span class="codicon" :class="m.provider === 'anthropic' ? 'codicon-sparkle' : 'codicon-globe'"></span>
+                  <span class="agent-config__model-name">{{ m.displayName || m.modelId }}</span>
+                  <button
+                    class="icon-button codicon codicon-trash agent-config__model-delete"
+                    @click.stop="deleteModel(m)"
+                  ></button>
+                </div>
+              </div>
             </div>
-            <div class="agent-config__hint">
-              Works with any OpenAI-compatible API (OpenAI, Azure, Ollama, LM Studio, DeepSeek, etc.)
+
+            <!-- Right: form -->
+            <div class="agent-config__body">
+              <!-- Provider tabs -->
+              <div class="agent-config__provider-tabs">
+                <button
+                  class="agent-config__provider-tab"
+                  :class="{ active: editingModel.provider === 'openai' }"
+                  @click="setProvider('openai')"
+                >
+                  <span class="codicon codicon-globe"></span> OpenAI
+                </button>
+                <button
+                  class="agent-config__provider-tab"
+                  :class="{ active: editingModel.provider === 'anthropic' }"
+                  @click="setProvider('anthropic')"
+                >
+                  <span class="codicon codicon-sparkle"></span> Anthropic
+                </button>
+              </div>
+
+              <div class="agent-config__grid">
+                <label class="agent-config__field">
+                  <span class="agent-config__label">
+                    <span class="codicon codicon-info"></span> 显示名称
+                  </span>
+                  <input v-model="editingModel.displayName" type="text" placeholder="例如：OpenAI - GPT-4.1" class="agent-config__input" />
+                </label>
+                <label class="agent-config__field">
+                  <span class="agent-config__label">
+                    <span class="codicon codicon-info"></span> 模型标识
+                  </span>
+                  <input v-model="editingModel.modelId" type="text" placeholder="例如：gpt-4.1" class="agent-config__input" />
+                </label>
+                <label class="agent-config__field">
+                  <span class="agent-config__label">
+                    <span class="codicon codicon-info"></span> 访问密钥
+                  </span>
+                  <div class="agent-config__input-row">
+                    <input
+                      v-model="editingModel.apiKey"
+                      :type="showApiKeyMap[editingModel.id] ? 'text' : 'password'"
+                      placeholder="例如：sk-xxxxxx"
+                      class="agent-config__input"
+                    />
+                    <button class="icon-button codicon" :class="showApiKeyMap[editingModel.id] ? 'codicon-eye-closed' : 'codicon-eye'" @click="toggleShowApiKey(editingModel.id)"></button>
+                  </div>
+                </label>
+                <label class="agent-config__field">
+                  <span class="agent-config__label">
+                    <span class="codicon codicon-info"></span> 接口地址
+                  </span>
+                  <input v-model="editingModel.baseUrl" type="text" :placeholder="editingModel.provider === 'anthropic' ? '例如：https://api.anthropic.com' : '例如：https://api.openai.com/v1'" class="agent-config__input" />
+                </label>
+                <label class="agent-config__field">
+                  <span class="agent-config__label">
+                    <span class="codicon codicon-info"></span> 上下文窗口
+                  </span>
+                  <input v-model.number="editingModel.contextWindow" type="number" placeholder="例如：200000（留空用默认值）" class="agent-config__input" />
+                </label>
+                <label class="agent-config__field">
+                  <span class="agent-config__label">
+                    <span class="codicon codicon-info"></span> 最大输出 Token
+                  </span>
+                  <input v-model.number="editingModel.maxOutputTokens" type="number" placeholder="例如：65536（留空用默认值）" class="agent-config__input" />
+                </label>
+                <label v-if="editingModel.provider === 'openai'" class="agent-config__field">
+                  <span class="agent-config__label">
+                    <span class="codicon codicon-lightbulb"></span> 推理强度
+                  </span>
+                  <select v-model="editingModel.reasoningStrength" class="agent-config__input">
+                    <option v-for="opt in strengthOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                  </select>
+                </label>
+                <label v-else class="agent-config__field">
+                  <span class="agent-config__label">
+                    <span class="codicon codicon-lightbulb"></span> 思考强度
+                  </span>
+                  <select v-model="editingModel.thinkingStrength" class="agent-config__input">
+                    <option v-for="opt in strengthOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                  </select>
+                </label>
+                <label v-if="editingModel.provider === 'openai'" class="agent-config__field">
+                  <span class="agent-config__label">
+                    <span class="codicon codicon-info"></span> 接口端点
+                  </span>
+                  <select v-model="editingModel.endpoint" class="agent-config__input">
+                    <option v-for="opt in endpointOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="agent-config__advanced">
+                <label class="agent-config__field agent-config__field--toggle">
+                  <span class="agent-config__label">
+                    <span class="codicon codicon-info"></span>
+                    {{ editingModel.provider === 'anthropic' ? 'Anthropic 额外参数 JSON' : '额外参数 JSON' }}
+                  </span>
+                  <input v-model="editingModel.extraParamsEnabled" type="checkbox" />
+                </label>
+                <textarea
+                  v-model="editingModel.extraParams"
+                  :disabled="!editingModel.extraParamsEnabled"
+                  rows="3"
+                  placeholder='例如：{ "top_p": 0.9 }'
+                  class="agent-config__input agent-config__textarea"
+                ></textarea>
+              </div>
+
+              <div class="agent-config__advanced">
+                <label class="agent-config__field agent-config__field--toggle">
+                  <span class="agent-config__label">
+                    <span class="codicon codicon-info"></span> 自定义请求头 JSON
+                  </span>
+                  <input v-model="editingModel.customHeadersEnabled" type="checkbox" />
+                </label>
+                <textarea
+                  v-model="editingModel.customHeaders"
+                  :disabled="!editingModel.customHeadersEnabled"
+                  rows="3"
+                  placeholder='例如：{ "X-Custom-Header": "value" }'
+                  class="agent-config__input agent-config__textarea"
+                ></textarea>
+              </div>
+
+              <label class="agent-config__field">
+                <span class="agent-config__label">
+                  <span class="codicon codicon-info"></span> 备注
+                </span>
+                <textarea v-model="editingModel.notes" rows="3" placeholder="备注" class="agent-config__input agent-config__textarea"></textarea>
+              </label>
+
+              <!-- Model test -->
+              <div class="agent-config__test">
+                <div class="agent-config__test-title">模型测试</div>
+                <div v-if="!testResult" class="agent-config__test-status">
+                  {{ testingModel ? '测试中...' : '尚未测试' }}
+                </div>
+                <div v-else-if="testResult.ok" class="agent-config__test-status agent-config__test-status--ok">
+                  测试通过：{{ testResult.response }}
+                </div>
+                <div v-else class="agent-config__test-status agent-config__test-status--err">
+                  测试失败：{{ testResult.error }}
+                </div>
+              </div>
             </div>
           </div>
+
           <div class="agent-config__footer">
-            <button class="ghost-button" @click="showConfig = false">Cancel</button>
-            <button class="primary-button" @click="saveConfig">Save</button>
+            <button class="ghost-button" @click="showConfig = false">取消</button>
+            <button class="primary-button" :disabled="testingModel" @click="saveConfig(true)">保存并测试</button>
+            <button class="primary-button" :disabled="testingModel" @click="saveConfig(false)">保存</button>
           </div>
         </div>
       </div>
