@@ -496,7 +496,27 @@ function buildMockApi() {
     },
     async showItemInFolder() {
       return { success: true };
-    }
+    },
+
+    // Agent mock API
+    async agentSetConfig() { return { ok: true }; },
+    async agentGetConfig() {
+      return {
+        apiKey: '',
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-4o',
+        temperature: 0.7,
+        maxTokens: 4096
+      };
+    },
+    async agentCreateSession() { return 'mock-session'; },
+    async agentGetMessages() { return []; },
+    async agentClearSession() { return { ok: true }; },
+    async agentAbort() { return { ok: true }; },
+    async agentSend() { return { ok: true }; },
+    async agentSetWorkspace() { return { ok: true }; },
+    onAgentEvent() {},
+    offAgentEvent() {}
   };
 }
 

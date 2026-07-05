@@ -12,12 +12,14 @@ import ExtensionsPanel from './components/ExtensionsPanel.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
 import ContextMenu from './components/ContextMenu.vue';
 import { useWorkspaceStore } from './stores/workspace.js';
+import { useAgentStore } from './stores/agent.js';
 import { setLocale, t } from './utils/i18n.js';
 import { getDesktopApi } from './services/desktop.js';
 
 const desktopApi = getDesktopApi();
 
 const workspaceStore = useWorkspaceStore();
+const agentStore = useAgentStore();
 const {
   appInfo,
   recentProjects,
@@ -648,10 +650,12 @@ function cancelInlineEdit() {
 
 function handleModeChange(mode) {
   workspaceStore.setMode(mode);
+  agentStore.setMode(mode);
 }
 
 function handleModelChange(model) {
   workspaceStore.setModel(model);
+  agentStore.setModel(model);
 }
 
 function handleEditorChange(value) {
@@ -669,6 +673,8 @@ watch(workspacePath, async (newPath) => {
     desktopApi.onFileChanged?.(() => {
       workspaceStore.refreshFileTree();
     });
+    // Update agent workspace context
+    desktopApi.agentSetWorkspace?.(newPath, workspaceName.value);
   } else {
     desktopApi.unwatchWorkspace?.();
   }
@@ -984,6 +990,13 @@ onMounted(async () => {
   document.addEventListener('pointerdown', handleGlobalPointerDown);
   document.addEventListener('keydown', handleMenuKeydown);
   window.addEventListener('blur', handleWindowBlur);
+  // Load agent config and sync workspace
+  agentStore.loadConfig();
+  agentStore.setMode(activeMode.value);
+  agentStore.setModel(selectedModel.value);
+  if (workspacePath.value) {
+    desktopApi.agentSetWorkspace?.(workspacePath.value, workspaceName.value);
+  }
 });
 
 onBeforeUnmount(() => {

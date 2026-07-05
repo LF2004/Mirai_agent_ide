@@ -7,6 +7,7 @@ import { DatabaseService } from './services/database-service.js';
 import { WorkspaceTools } from './tools/workspace-tools.js';
 import { TerminalTools } from './tools/terminal-tools.js';
 import { ExtensionTools } from './tools/extension-tools.js';
+import { AgentService } from './services/agent-service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +17,7 @@ let databaseService = null;
 let workspaceTools = null;
 let terminalTools = null;
 let extensionTools = null;
+let agentService = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -48,6 +50,7 @@ async function bootstrapServices() {
   workspaceTools = new WorkspaceTools(databaseService);
   terminalTools = new TerminalTools();
   extensionTools = new ExtensionTools(databaseService);
+  agentService = new AgentService(databaseService);
 }
 
 function registerIpcHandlers() {
@@ -241,6 +244,62 @@ function registerIpcHandlers() {
       fileWatcher.close();
       fileWatcher = null;
     }
+    return { ok: true };
+  });
+
+  // ===== Agent IPC handlers =====
+
+  ipcMain.handle('agent:set-config', async (_, config) => {
+    agentService.setConfig(config || {});
+    return { ok: true };
+  });
+
+  ipcMain.handle('agent:get-config', async () => {
+    return agentService.getConfig();
+  });
+
+  ipcMain.handle('agent:create-session', async (_, mode) => {
+    return agentService.createSession(mode || 'agent');
+  });
+
+  ipcMain.handle('agent:get-messages', async (_, sessionId) => {
+    return agentService.getMessages(sessionId);
+  });
+
+  ipcMain.handle('agent:clear-session', async (_, sessionId) => {
+    agentService.clearSession(sessionId);
+    return { ok: true };
+  });
+
+  ipcMain.handle('agent:abort', async () => {
+    agentService.abort();
+    return { ok: true };
+  });
+
+  // Agent send with streaming events via webContents.send
+  ipcMain.handle('agent:send', async (_, payload) => {
+    const { sessionId, content } = payload || {};
+    if (!sessionId || !content) {
+      return { ok: false, error: 'Missing sessionId or content' };
+    }
+
+    // Set workspace context if available
+    const state = databaseService.getBootstrapState();
+    if (state?.workspacePath) {
+      agentService.setWorkspace(state.workspacePath, state.workspaceName);
+    }
+
+    await agentService.sendMessage(sessionId, content, (event) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('agent:event', { sessionId, ...event });
+      }
+    });
+
+    return { ok: true };
+  });
+
+  ipcMain.handle('agent:set-workspace', async (_, wsPath, wsName) => {
+    agentService.setWorkspace(wsPath, wsName);
     return { ok: true };
   });
 }

@@ -52,6 +52,31 @@ const rootInlineValue = ref('');
 const fileFilter = ref('');
 const hasWorkspace = computed(() => Boolean(props.workspacePath));
 
+function filterTreeNodes(nodes, query) {
+  if (!query) return nodes;
+  const q = query.toLowerCase();
+  const result = [];
+  for (const node of nodes) {
+    if (node.type === 'folder') {
+      const filteredChildren = filterTreeNodes(node.children || [], query);
+      if (filteredChildren.length > 0 || node.name.toLowerCase().includes(q)) {
+        result.push({ ...node, children: filteredChildren });
+      }
+    } else {
+      if (node.name.toLowerCase().includes(q)) {
+        result.push(node);
+      }
+    }
+  }
+  return result;
+}
+
+const filteredTreeChildren = computed(() => {
+  if (!props.tree?.children) return [];
+  if (!fileFilter.value.trim()) return props.tree.children;
+  return filterTreeNodes(props.tree.children, fileFilter.value.trim());
+});
+
 // Root-level inline edit: when creating at workspace root (targetPath is empty)
 const isRootInlineEdit = computed(() => {
   if (!props.inlineEdit) {
@@ -205,7 +230,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <FileTreeNode
-            v-for="child in tree.children"
+            v-for="child in filteredTreeChildren"
             :key="child.path"
             :node="child"
             :active-file-path="activeFilePath"

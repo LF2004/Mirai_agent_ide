@@ -184,17 +184,44 @@ function bindTerminalEvents(instance) {
   });
 }
 
+function getThemeColor(varName, fallback) {
+  if (typeof window === 'undefined') return fallback;
+  const style = getComputedStyle(document.documentElement);
+  const val = style.getPropertyValue(varName).trim();
+  return val || fallback;
+}
+
+function buildTerminalTheme() {
+  return {
+    background: getThemeColor('--terminal-bg', '#1e1e1e'),
+    foreground: getThemeColor('--terminal-fg', '#d4d4d4'),
+    cursor: getThemeColor('--terminal-cursor', '#ffffff'),
+    selectionBackground: getThemeColor('--editor-selection', '#264f78'),
+    black: getThemeColor('--terminal-bg', '#1e1e1e'),
+    red: '#f48771',
+    green: '#89d185',
+    yellow: '#e2c08d',
+    blue: '#75beff',
+    magenta: '#c586c0',
+    cyan: '#9cdcfe',
+    white: '#d4d4d4',
+    brightBlack: '#808080',
+    brightRed: '#f48771',
+    brightGreen: '#89d185',
+    brightYellow: '#e2c08d',
+    brightBlue: '#75beff',
+    brightMagenta: '#c586c0',
+    brightCyan: '#9cdcfe',
+    brightWhite: '#ffffff'
+  };
+}
+
 onMounted(async () => {
   terminal.value = new Terminal({
     cursorBlink: true,
     fontSize: props.fontSize,
     fontFamily: 'Consolas, "Cascadia Code", monospace',
-    theme: {
-      background: 'var(--terminal-bg)',
-      foreground: 'var(--terminal-fg)',
-      cursor: 'var(--terminal-cursor)',
-      selectionBackground: 'var(--editor-selection)'
-    },
+    theme: buildTerminalTheme(),
     allowTransparency: true,
     convertEol: true
   });

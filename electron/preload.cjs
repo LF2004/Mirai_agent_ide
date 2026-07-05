@@ -34,5 +34,17 @@ contextBridge.exposeInMainWorld('mirai', {
   watchWorkspace: (payload) => ipcRenderer.invoke('workspace:watch', payload),
   unwatchWorkspace: () => ipcRenderer.invoke('workspace:unwatch'),
   onFileChanged: (callback) => ipcRenderer.on('workspace:file-changed', (_, data) => callback(data)),
-  offFileChanged: () => ipcRenderer.removeAllListeners('workspace:file-changed')
+  offFileChanged: () => ipcRenderer.removeAllListeners('workspace:file-changed'),
+
+  // Agent APIs
+  agentSetConfig: (config) => ipcRenderer.invoke('agent:set-config', config),
+  agentGetConfig: () => ipcRenderer.invoke('agent:get-config'),
+  agentCreateSession: (mode) => ipcRenderer.invoke('agent:create-session', mode),
+  agentGetMessages: (sessionId) => ipcRenderer.invoke('agent:get-messages', sessionId),
+  agentClearSession: (sessionId) => ipcRenderer.invoke('agent:clear-session', sessionId),
+  agentAbort: () => ipcRenderer.invoke('agent:abort'),
+  agentSend: (payload) => ipcRenderer.invoke('agent:send', payload),
+  agentSetWorkspace: (wsPath, wsName) => ipcRenderer.invoke('agent:set-workspace', wsPath, wsName),
+  onAgentEvent: (callback) => ipcRenderer.on('agent:event', (_, data) => callback(data)),
+  offAgentEvent: () => ipcRenderer.removeAllListeners('agent:event')
 });
