@@ -59,28 +59,30 @@ const {
   renderWhitespace,
   bracketPairColorization,
   cursorBlinking,
-  smoothScrolling
+  smoothScrolling,
+  layoutState
 } = storeToRefs(workspaceStore);
 
-// Layout state — backed by workspaceStore.layoutState and persisted to SQLite
+// Layout state — backed by workspaceStore.layoutState and persisted to SQLite.
+// Use storeToRefs so the computed getters track the reactive layoutState ref.
 const activeSidebar = computed({
-  get: () => workspaceStore.layoutState.activeSidebar,
+  get: () => layoutState.value.activeSidebar,
   set: (v) => workspaceStore.setActiveSidebar(v)
 });
 const sidebarVisible = computed({
-  get: () => workspaceStore.layoutState.sidebarVisible,
+  get: () => layoutState.value.sidebarVisible,
   set: (v) => workspaceStore.setSidebarVisible(v)
 });
 const isAgentCollapsed = computed({
-  get: () => workspaceStore.layoutState.isAgentCollapsed,
+  get: () => layoutState.value.isAgentCollapsed,
   set: (v) => workspaceStore.setAgentCollapsed(v)
 });
 const isTerminalCollapsed = computed({
-  get: () => workspaceStore.layoutState.isTerminalCollapsed,
+  get: () => layoutState.value.isTerminalCollapsed,
   set: (v) => workspaceStore.setTerminalCollapsed(v)
 });
 const terminalHeight = computed({
-  get: () => workspaceStore.layoutState.terminalHeight,
+  get: () => layoutState.value.terminalHeight,
   set: (v) => workspaceStore.setTerminalHeight(v)
 });
 
@@ -144,7 +146,7 @@ const titleMenus = computed(() => [
       }, disabled: !openFiles.value.some((file) => file.dirty) },
       { separator: true },
       { label: t('newTerminal'), shortcut: keybinds.value.terminal, action: handleNewTerminal },
-      { label: t('configureTerminal'), action: () => (activeSidebar.value = 'settings'), disabled: true }
+      { label: t('configureTerminal'), action: () => (activateSidebar('settings')), disabled: true }
     ]
   },
   {
@@ -163,18 +165,18 @@ const titleMenus = computed(() => [
       { label: t('replace'), shortcut: keybinds.value.replace, action: focusEditor },
       { separator: true },
       { label: t('commandPalette'), shortcut: 'Ctrl+Shift+P', action: () => (quickCommand.value = '') },
-      { label: t('preferences'), action: () => (activeSidebar.value = 'settings') }
+      { label: t('preferences'), action: () => (activateSidebar('settings')) }
     ]
   },
   {
     id: 'view',
     label: t('view'),
     items: [
-      { label: t('explorer'), shortcut: 'Ctrl+Shift+E', action: () => (activeSidebar.value = 'explorer'), checked: activeSidebar.value === 'explorer' },
-      { label: t('search'), shortcut: keybinds.value.search, action: () => (activeSidebar.value = 'search'), checked: activeSidebar.value === 'search' },
-      { label: t('extensions'), shortcut: 'Ctrl+Shift+X', action: () => (activeSidebar.value = 'extensions'), checked: activeSidebar.value === 'extensions' },
-      { label: t('agent'), action: () => (activeSidebar.value = 'agent'), checked: activeSidebar.value === 'agent' },
-      { label: t('settings'), action: () => (activeSidebar.value = 'settings'), checked: activeSidebar.value === 'settings' },
+      { label: t('explorer'), shortcut: 'Ctrl+Shift+E', action: () => (activateSidebar('explorer')), checked: activeSidebar.value === 'explorer' },
+      { label: t('search'), shortcut: keybinds.value.search, action: () => (activateSidebar('search')), checked: activeSidebar.value === 'search' },
+      { label: t('extensions'), shortcut: 'Ctrl+Shift+X', action: () => (activateSidebar('extensions')), checked: activeSidebar.value === 'extensions' },
+      { label: t('agent'), action: () => (activateSidebar('agent')), checked: activeSidebar.value === 'agent' },
+      { label: t('settings'), action: () => (activateSidebar('settings')), checked: activeSidebar.value === 'settings' },
       { separator: true },
       { label: t('toggleSidebar'), shortcut: 'Ctrl+B', action: toggleSidebar },
       { label: t('toggleTerminal'), shortcut: 'Ctrl+J', action: toggleTerminalPanel },
@@ -189,7 +191,7 @@ const titleMenus = computed(() => [
     id: 'go',
     label: t('go'),
     items: [
-      { label: t('focusExplorer'), shortcut: 'Ctrl+Shift+E', action: () => (activeSidebar.value = 'explorer') },
+      { label: t('focusExplorer'), shortcut: 'Ctrl+Shift+E', action: () => (activateSidebar('explorer')) },
       { label: t('focusEditor'), action: focusEditor },
       { label: t('focusActiveFile'), action: focusEditor },
       { label: t('focusTerminal'), action: focusTerminal }
@@ -214,7 +216,9 @@ const titleMenus = computed(() => [
       { label: t('togglePanels'), action: togglePanels },
       { separator: true },
       { label: t('collapseAgentPanel'), action: () => (isAgentCollapsed.value = true), disabled: isAgentCollapsed.value },
-      { label: t('showAgentPanel'), action: () => (isAgentCollapsed.value = false), disabled: !isAgentCollapsed.value }
+      { label: t('showAgentPanel'), action: () => (isAgentCollapsed.value = false), disabled: !isAgentCollapsed.value },
+      { separator: true },
+      { label: t('resetLayout'), action: handleResetLayout }
     ]
   },
   {
@@ -264,11 +268,23 @@ function joinPath(basePath, name) {
 }
 
 async function handleOpenProject() {
-  await workspaceStore.openProjectFromDialog();
+  try {
+    await workspaceStore.openProjectFromDialog();
+  } catch (error) {
+    console.error('handleOpenProject failed:', error);
+  }
 }
 
 async function handleCreateProject() {
-  await workspaceStore.createProject(draftProjectName.value);
+  try {
+    await workspaceStore.createProject(draftProjectName.value);
+  } catch (error) {
+    console.error('handleCreateProject failed:', error);
+  }
+}
+
+function handleResetLayout() {
+  workspaceStore.resetLayoutState();
 }
 
 async function handleTreeSelect(node) {
@@ -362,8 +378,14 @@ function toggleSidebar() {
   sidebarVisible.value = !sidebarVisible.value;
 }
 
+function activateSidebar(tab) {
+  sidebarVisible.value = true;
+  activeSidebar.value = tab;
+}
+
 function togglePanels() {
   activeSidebar.value = activeSidebar.value === 'agent' ? 'explorer' : 'agent';
+  sidebarVisible.value = true;
 }
 
 function toggleTerminalPanel() {
@@ -439,13 +461,13 @@ function handleMenuKeydown(event) {
 
   if (eventMatchesShortcut(event, keybinds.value.search)) {
     event.preventDefault();
-    activeSidebar.value = 'search';
+    activateSidebar('search');
     closeMenu();
   }
 
   if (eventMatchesShortcut(event, keybinds.value.replace)) {
     event.preventDefault();
-    activeSidebar.value = 'search';
+    activateSidebar('search');
     searchState.value.replaceExpanded = true;
     closeMenu();
   }
@@ -847,7 +869,7 @@ const editorContextMenuItems = computed(() => [
   { separator: true },
   { id: 'selectAll', label: t('selectAll'), shortcut: 'Ctrl+A', action: () => document.execCommand?.('selectAll') },
   { id: 'find', label: t('find'), shortcut: 'Ctrl+F', action: focusEditor },
-  { id: 'replace', label: t('replace'), shortcut: 'Ctrl+H', action: () => { activeSidebar.value = 'search'; } },
+  { id: 'replace', label: t('replace'), shortcut: 'Ctrl+H', action: () => { activateSidebar('search'); } },
   { separator: true },
   { id: 'save', label: t('saveFile'), shortcut: 'Ctrl+S', action: handleSaveFile, disabled: !activeFilePath.value },
   { id: 'format', label: t('formatDocument') || 'Format Document', action: () => editorPanelRef.value?.format?.(), disabled: !activeFilePath.value },
@@ -896,12 +918,12 @@ async function handleCopyRelativePath(filePath) {
 }
 
 function handleRevealInExplorer(filePath) {
-  activeSidebar.value = 'explorer';
+  activateSidebar('explorer');
   workspaceStore.revealWorkspace(filePath);
 }
 
 function handleFindInFolder(folderPath) {
-  activeSidebar.value = 'search';
+  activateSidebar('search');
   searchState.value.includeFiles = folderPath + '/**';
   searchState.value.query = '';
 }
@@ -955,10 +977,10 @@ const commandPaletteItems = computed(() => {
       }
     }, disabled: !openFiles.value.some((f) => f.dirty) },
     { separator: true },
-    { id: 'view.explorer', label: t('explorer'), shortcut: 'Ctrl+Shift+E', icon: 'codicon codicon-files', action: () => activeSidebar.value = 'explorer' },
-    { id: 'view.search', label: t('search'), shortcut: 'Ctrl+Shift+F', icon: 'codicon codicon-search', action: () => activeSidebar.value = 'search' },
-    { id: 'view.extensions', label: t('extensions'), shortcut: 'Ctrl+Shift+X', icon: 'codicon codicon-extensions', action: () => activeSidebar.value = 'extensions' },
-    { id: 'view.settings', label: t('settings'), icon: 'codicon codicon-settings-gear', action: () => activeSidebar.value = 'settings' },
+    { id: 'view.explorer', label: t('explorer'), shortcut: 'Ctrl+Shift+E', icon: 'codicon codicon-files', action: () => activateSidebar('explorer') },
+    { id: 'view.search', label: t('search'), shortcut: 'Ctrl+Shift+F', icon: 'codicon codicon-search', action: () => activateSidebar('search') },
+    { id: 'view.extensions', label: t('extensions'), shortcut: 'Ctrl+Shift+X', icon: 'codicon codicon-extensions', action: () => activateSidebar('extensions') },
+    { id: 'view.settings', label: t('settings'), icon: 'codicon codicon-settings-gear', action: () => activateSidebar('settings') },
     { id: 'view.toggleTerminal', label: t('toggleTerminal'), shortcut: 'Ctrl+J', icon: 'codicon codicon-terminal', action: toggleTerminalPanel },
     { id: 'view.toggleSidebar', label: t('toggleSidebar'), shortcut: 'Ctrl+B', icon: 'codicon codicon-panel-left', action: toggleSidebar },
     { separator: true },
@@ -966,7 +988,7 @@ const commandPaletteItems = computed(() => {
     { id: 'edit.undo', label: t('undo'), shortcut: 'Ctrl+Z', icon: 'codicon codicon-discard', action: handleUndo },
     { id: 'edit.redo', label: t('redo'), shortcut: 'Ctrl+Y', icon: 'codicon codicon-redo', action: handleRedo },
     { separator: true },
-    { id: 'preferences', label: t('preferences'), icon: 'codicon codicon-settings', action: () => activeSidebar.value = 'settings' }
+    { id: 'preferences', label: t('preferences'), icon: 'codicon codicon-settings', action: () => activateSidebar('settings') }
   ];
 
   const q = commandPaletteQuery.value.trim().toLowerCase();
@@ -1069,31 +1091,31 @@ onBeforeUnmount(() => {
           class="activitybar__item codicon codicon-files"
           :class="{ 'is-active': activeSidebar === 'explorer' }"
           title="Explorer"
-          @click="activeSidebar = 'explorer'"
+          @click="activateSidebar('explorer')"
         ></button>
         <button
           class="activitybar__item codicon codicon-search"
           :class="{ 'is-active': activeSidebar === 'search' }"
           title="Search"
-          @click="activeSidebar = 'search'"
+          @click="activateSidebar('search')"
         ></button>
         <button
           class="activitybar__item codicon codicon-extensions"
           :class="{ 'is-active': activeSidebar === 'extensions' }"
           title="Extensions"
-          @click="activeSidebar = 'extensions'"
+          @click="activateSidebar('extensions')"
         ></button>
         <button
           class="activitybar__item codicon codicon-hubot"
           :class="{ 'is-active': activeSidebar === 'agent' }"
           title="Agent"
-          @click="activeSidebar = 'agent'"
+          @click="activateSidebar('agent')"
         ></button>
         <button
           class="activitybar__item activitybar__item--bottom codicon codicon-settings-gear"
           :class="{ 'is-active': activeSidebar === 'settings' }"
           title="Settings"
-          @click="activeSidebar = 'settings'"
+          @click="activateSidebar('settings')"
         ></button>
       </nav>
 

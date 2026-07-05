@@ -261,12 +261,22 @@ function registerIpcHandlers() {
   // ===== Layout state IPC handlers =====
 
   ipcMain.handle('layout:get', async () => {
-    return databaseService.getLayoutState() || {};
+    try {
+      return databaseService.getLayoutState() || {};
+    } catch (err) {
+      console.error('layout:get failed:', err);
+      return {};
+    }
   });
 
   ipcMain.handle('layout:set', async (_, state) => {
-    databaseService.saveLayoutState(state || {});
-    return { ok: true };
+    try {
+      databaseService.saveLayoutState(state || {});
+      return { ok: true };
+    } catch (err) {
+      console.error('layout:set failed:', err);
+      return { ok: false, error: err?.message || String(err) };
+    }
   });
 
   ipcMain.handle('agent:test-model', async (_, model) => {

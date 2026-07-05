@@ -428,28 +428,51 @@ export const useWorkspaceStore = defineStore('workspace', {
       }
     },
     async openProjectFromDialog() {
-      const result = await desktopApi.openProjectDialog();
-      if (!result || result.canceled) {
-        return;
+      try {
+        const result = await desktopApi.openProjectDialog();
+        if (!result || result.canceled) {
+          return;
+        }
+        await this.applyWorkspace(result);
+      } catch (error) {
+        this.appendLog('error', `Open project failed: ${error?.message || String(error)}`);
+        console.error('openProjectFromDialog failed:', error);
       }
-      await this.applyWorkspace(result);
     },
     async createProject(name) {
-      const result = await desktopApi.createProject({ name });
-      if (!result || result.canceled) {
-        return;
+      try {
+        const result = await desktopApi.createProject({ name });
+        if (!result || result.canceled) {
+          return;
+        }
+        await this.applyWorkspace(result);
+      } catch (error) {
+        this.appendLog('error', `Create project failed: ${error?.message || String(error)}`);
+        console.error('createProject failed:', error);
       }
-      await this.applyWorkspace(result);
     },
     async openRecentProject(workspacePath) {
-      const result = await desktopApi.openWorkspace(workspacePath);
-      await this.applyWorkspace(result);
+      try {
+        const result = await desktopApi.openWorkspace(workspacePath);
+        await this.applyWorkspace(result);
+      } catch (error) {
+        this.appendLog('error', `Open recent project failed: ${error?.message || String(error)}`);
+        console.error('openRecentProject failed:', error);
+      }
     },
     async applyWorkspace(result) {
       this.workspaceName = result.name;
       this.workspacePath = result.path;
       this.fileTree = result.tree;
       this.bootError = '';
+      // When a project is opened, ensure the sidebar is visible and the explorer is active
+      // so the user can see the file tree immediately.
+      if (this.layoutState && !this.layoutState.sidebarVisible) {
+        this.setSidebarVisible(true);
+      }
+      if (this.layoutState && this.layoutState.activeSidebar !== 'explorer') {
+        this.setActiveSidebar('explorer');
+      }
       this.appendLog('info', `Workspace opened: ${result.path}`);
       this.recentProjects = [
         {
@@ -963,6 +986,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       if (this.layoutLoaded) return;
       try {
         const saved = await desktopApi.getLayoutState?.();
+        console.log('[workspace] loadLayoutState:', saved);
         if (saved && typeof saved === 'object') {
           this.layoutState = {
             activeSidebar: saved.activeSidebar || 'explorer',
@@ -974,7 +998,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         }
         this.layoutLoaded = true;
       } catch (err) {
-        console.error('Failed to load layout state:', err);
+        console.error('[workspace] Failed to load layout state:', err);
         this.layoutLoaded = true;
       }
     },
@@ -982,13 +1006,17 @@ export const useWorkspaceStore = defineStore('workspace', {
     _persistLayout() {
       if (this._layoutTimer) clearTimeout(this._layoutTimer);
       this._layoutTimer = setTimeout(() => {
-        desktopApi.setLayoutState?.({
+        const payload = {
           activeSidebar: this.layoutState.activeSidebar,
           sidebarVisible: this.layoutState.sidebarVisible,
           isAgentCollapsed: this.layoutState.isAgentCollapsed,
           isTerminalCollapsed: this.layoutState.isTerminalCollapsed,
           terminalHeight: this.layoutState.terminalHeight
-        }).catch(() => {});
+        };
+        console.log('[workspace] persistLayout:', payload);
+        desktopApi.setLayoutState?.(payload).catch((err) => {
+          console.error('[workspace] Failed to persist layout state:', err);
+        });
       }, 300);
     },
 
@@ -1030,6 +1058,20 @@ export const useWorkspaceStore = defineStore('workspace', {
     setTerminalHeight(value) {
       this.layoutState.terminalHeight = Number(value) || 220;
       this._persistLayout();
+    },
+
+    // Reset layout to defaults and clear persisted layout state.
+    // Useful for recovering from a corrupted or hidden sidebar state.
+    resetLayoutState() {
+      this.layoutState = {
+        activeSidebar: 'explorer',
+        sidebarVisible: true,
+        isAgentCollapsed: false,
+        isTerminalCollapsed: true,
+        terminalHeight: 220
+      };
+      this._persistLayout();
+      this.appendLog('info', 'Layout state reset to defaults.');
     },
 
     async runSearch(query, replaceText = '') {
