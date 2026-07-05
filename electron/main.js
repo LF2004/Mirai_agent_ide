@@ -258,6 +258,17 @@ function registerIpcHandlers() {
     return agentService.getConfig();
   });
 
+  // ===== Layout state IPC handlers =====
+
+  ipcMain.handle('layout:get', async () => {
+    return databaseService.getLayoutState() || {};
+  });
+
+  ipcMain.handle('layout:set', async (_, state) => {
+    databaseService.saveLayoutState(state || {});
+    return { ok: true };
+  });
+
   ipcMain.handle('agent:test-model', async (_, model) => {
     return agentService.testModel(model || {});
   });

@@ -90,18 +90,6 @@ export class DatabaseService {
     }
   }
 
-  saveRecentProject(project) {
-    this.database
-      .prepare(`
-        INSERT INTO recent_projects (name, path, last_opened_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(path) DO UPDATE SET
-          name = excluded.name,
-          last_opened_at = excluded.last_opened_at
-      `)
-      .run(project.name, project.path, new Date().toISOString());
-  }
-
   saveSetting(key, value) {
     this.database
       .prepare(`
@@ -116,5 +104,53 @@ export class DatabaseService {
       key,
       value
     };
+  }
+
+  // ===== Agent config =====
+
+  getAgentConfig() {
+    const row = this.database
+      .prepare(`SELECT value FROM settings WHERE key = 'agentConfig'`)
+      .get();
+    if (!row) return null;
+    try {
+      return JSON.parse(row.value);
+    } catch {
+      return null;
+    }
+  }
+
+  saveAgentConfig(config) {
+    return this.saveSetting('agentConfig', config);
+  }
+
+  // ===== Layout state =====
+
+  getLayoutState() {
+    const row = this.database
+      .prepare(`SELECT value FROM settings WHERE key = 'layoutState'`)
+      .get();
+    if (!row) return null;
+    try {
+      return JSON.parse(row.value);
+    } catch {
+      return null;
+    }
+  }
+
+  saveLayoutState(state) {
+    return this.saveSetting('layoutState', state);
+  }
+
+  saveRecentProject(project) {
+    this.database
+      .prepare(`
+        INSERT INTO recent_projects (name, path, last_opened_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(path) DO UPDATE SET
+          name = excluded.name,
+          last_opened_at = excluded.last_opened_at
+      `)
+      .run(project.name, project.path, new Date().toISOString());
   }
 }

@@ -61,9 +61,29 @@ const {
   cursorBlinking,
   smoothScrolling
 } = storeToRefs(workspaceStore);
-const activeSidebar = ref('explorer');
-const sidebarVisible = ref(true);
-const isAgentCollapsed = ref(false);
+
+// Layout state — backed by workspaceStore.layoutState and persisted to SQLite
+const activeSidebar = computed({
+  get: () => workspaceStore.layoutState.activeSidebar,
+  set: (v) => workspaceStore.setActiveSidebar(v)
+});
+const sidebarVisible = computed({
+  get: () => workspaceStore.layoutState.sidebarVisible,
+  set: (v) => workspaceStore.setSidebarVisible(v)
+});
+const isAgentCollapsed = computed({
+  get: () => workspaceStore.layoutState.isAgentCollapsed,
+  set: (v) => workspaceStore.setAgentCollapsed(v)
+});
+const isTerminalCollapsed = computed({
+  get: () => workspaceStore.layoutState.isTerminalCollapsed,
+  set: (v) => workspaceStore.setTerminalCollapsed(v)
+});
+const terminalHeight = computed({
+  get: () => workspaceStore.layoutState.terminalHeight,
+  set: (v) => workspaceStore.setTerminalHeight(v)
+});
+
 const draftProjectName = ref('mirai-demo');
 const inlineEdit = ref(null);
 const undoToast = ref(null);
@@ -75,8 +95,6 @@ const activeSubmenu = ref('');
 const menuRootRef = ref(null);
 const editorFocusLine = ref(0);
 const editorPanelRef = ref(null);
-const isTerminalCollapsed = ref(true);
-const terminalHeight = ref(220);
 const editorContextMenu = ref({ visible: false, x: 0, y: 0 });
 const commandPaletteOpen = ref(false);
 const commandPaletteQuery = ref('');

@@ -36,6 +36,10 @@ contextBridge.exposeInMainWorld('mirai', {
   onFileChanged: (callback) => ipcRenderer.on('workspace:file-changed', (_, data) => callback(data)),
   offFileChanged: () => ipcRenderer.removeAllListeners('workspace:file-changed'),
 
+  // Layout state APIs
+  getLayoutState: () => ipcRenderer.invoke('layout:get'),
+  setLayoutState: (state) => ipcRenderer.invoke('layout:set', state),
+
   // Agent APIs
   agentSetConfig: (config) => ipcRenderer.invoke('agent:set-config', config),
   agentGetConfig: () => ipcRenderer.invoke('agent:get-config'),

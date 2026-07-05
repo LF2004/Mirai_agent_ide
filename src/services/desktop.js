@@ -498,6 +498,14 @@ function buildMockApi() {
       return { success: true };
     },
 
+    // Layout state mock API
+    async getLayoutState() {
+      return inMemoryWorkspace.layoutState || {};
+    },
+    async setLayoutState() {
+      return { ok: true };
+    },
+
     // Agent mock API
     async agentSetConfig() { return { ok: true }; },
     async agentGetConfig() {

@@ -156,6 +156,7 @@ export const useAgentStore = defineStore('agent', {
       const model = provider === 'anthropic' ? createDefaultAnthropicModel() : createDefaultOpenAIModel();
       this.config.models.push(model);
       this.config.selectedModelId = model.id;
+      this._persistConfig();
       return model;
     },
 
@@ -163,6 +164,7 @@ export const useAgentStore = defineStore('agent', {
       const idx = this.config.models.findIndex(m => m.id === modelId);
       if (idx >= 0) {
         this.config.models[idx] = { ...this.config.models[idx], ...patch };
+        this._persistConfig();
       }
     },
 
@@ -173,11 +175,21 @@ export const useAgentStore = defineStore('agent', {
         if (this.config.selectedModelId === modelId) {
           this.config.selectedModelId = this.config.models[0]?.id || '';
         }
+        this._persistConfig();
       }
     },
 
     selectModel(modelId) {
       this.config.selectedModelId = modelId;
+      this._persistConfig();
+    },
+
+    // Fire-and-forget persistence helper — converts reactive state to plain
+    // object and sends to the backend for SQLite storage.
+    _persistConfig() {
+      this.saveConfig(this.config).catch((err) => {
+        console.error('Failed to persist model config:', err);
+      });
     },
 
     async testModel(model) {

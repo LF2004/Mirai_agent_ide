@@ -81,6 +81,17 @@ export const useWorkspaceStore = defineStore('workspace', {
     },
     historyStack: [],
     redoStack: [],
+
+    // Layout state — persisted to SQLite via layout:get/layout:set IPC
+    layoutState: {
+      activeSidebar: 'explorer',
+      sidebarVisible: true,
+      isAgentCollapsed: false,
+      isTerminalCollapsed: true,
+      terminalHeight: 220
+    },
+    layoutLoaded: false,
+
     logs: [
       {
         id: 'boot-log',
@@ -407,6 +418,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         };
         setLocale(this.locale);
         await this.loadInstalledExtensions();
+        await this.loadLayoutState();
         this.appendLog('success', 'Desktop bridge connected.');
       } catch (error) {
         this.bootError = error?.message || String(error);
@@ -945,6 +957,81 @@ export const useWorkspaceStore = defineStore('workspace', {
         value: this.keybinds[action]
       });
     },
+    // ===== Layout state =====
+
+    async loadLayoutState() {
+      if (this.layoutLoaded) return;
+      try {
+        const saved = await desktopApi.getLayoutState?.();
+        if (saved && typeof saved === 'object') {
+          this.layoutState = {
+            activeSidebar: saved.activeSidebar || 'explorer',
+            sidebarVisible: saved.sidebarVisible !== false,
+            isAgentCollapsed: saved.isAgentCollapsed === true,
+            isTerminalCollapsed: saved.isTerminalCollapsed !== false,
+            terminalHeight: saved.terminalHeight || 220
+          };
+        }
+        this.layoutLoaded = true;
+      } catch (err) {
+        console.error('Failed to load layout state:', err);
+        this.layoutLoaded = true;
+      }
+    },
+
+    _persistLayout() {
+      if (this._layoutTimer) clearTimeout(this._layoutTimer);
+      this._layoutTimer = setTimeout(() => {
+        desktopApi.setLayoutState?.({
+          activeSidebar: this.layoutState.activeSidebar,
+          sidebarVisible: this.layoutState.sidebarVisible,
+          isAgentCollapsed: this.layoutState.isAgentCollapsed,
+          isTerminalCollapsed: this.layoutState.isTerminalCollapsed,
+          terminalHeight: this.layoutState.terminalHeight
+        }).catch(() => {});
+      }, 300);
+    },
+
+    setActiveSidebar(value) {
+      this.layoutState.activeSidebar = value;
+      this._persistLayout();
+    },
+
+    setSidebarVisible(value) {
+      this.layoutState.sidebarVisible = value;
+      this._persistLayout();
+    },
+
+    toggleSidebar() {
+      this.layoutState.sidebarVisible = !this.layoutState.sidebarVisible;
+      this._persistLayout();
+    },
+
+    setAgentCollapsed(value) {
+      this.layoutState.isAgentCollapsed = value;
+      this._persistLayout();
+    },
+
+    toggleAgentCollapsed() {
+      this.layoutState.isAgentCollapsed = !this.layoutState.isAgentCollapsed;
+      this._persistLayout();
+    },
+
+    setTerminalCollapsed(value) {
+      this.layoutState.isTerminalCollapsed = value;
+      this._persistLayout();
+    },
+
+    toggleTerminalCollapsed() {
+      this.layoutState.isTerminalCollapsed = !this.layoutState.isTerminalCollapsed;
+      this._persistLayout();
+    },
+
+    setTerminalHeight(value) {
+      this.layoutState.terminalHeight = Number(value) || 220;
+      this._persistLayout();
+    },
+
     async runSearch(query, replaceText = '') {
       const nextQuery = typeof query === 'object' && query !== null ? query.query : query;
       const nextReplace = typeof query === 'object' && query !== null ? query.replace : replaceText;
