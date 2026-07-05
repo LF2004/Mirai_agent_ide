@@ -19,8 +19,8 @@ function createDefaultOpenAIModel() {
     maxOutputTokens: 4096,
     reasoningStrength: 'medium',
     endpoint: '/v1/chat/completions',
-    extraParams: {},
-    customHeaders: {},
+    extraParams: '',
+    customHeaders: '',
     extraParamsEnabled: false,
     customHeadersEnabled: false,
     notes: ''
@@ -38,8 +38,8 @@ function createDefaultAnthropicModel() {
     contextWindow: 200000,
     maxOutputTokens: 8192,
     thinkingStrength: 'medium',
-    extraParams: {},
-    customHeaders: {},
+    extraParams: '',
+    customHeaders: '',
     extraParamsEnabled: false,
     customHeadersEnabled: false,
     notes: ''

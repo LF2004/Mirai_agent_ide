@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount, inject } from 'vue';
 import { useAgentStore } from '../stores/agent.js';
 import { t } from '../utils/i18n.js';
 
@@ -25,6 +25,15 @@ const props = defineProps({
 const emit = defineEmits(['mode-change', 'model-change', 'toggle-collapse']);
 
 const agentStore = useAgentStore();
+const dialog = inject('ideDialog', { alert: fallbackAlert, confirm: fallbackConfirm });
+
+function fallbackAlert(message, title = '提示') {
+  window.alert(`${title}\n\n${message}`);
+}
+
+function fallbackConfirm(message, title = '确认') {
+  return Promise.resolve(window.confirm(`${title}\n\n${message}`));
+}
 
 const input = ref('');
 const messageListRef = ref(null);
@@ -58,6 +67,26 @@ const messages = computed(() => agentStore.messages);
 const hasConfig = computed(() => agentStore.hasConfig);
 const currentModel = computed(() => agentStore.currentModel);
 const modelsList = computed(() => agentStore.config.models);
+
+const agentStatus = computed(() => {
+  if (!isStreaming.value) return { label: 'Ready', icon: 'codicon-check', type: 'ready' };
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (lastMsg?.role === 'assistant' && lastMsg?.toolCalls?.length) {
+    const pending = lastMsg.toolCalls.filter(tc => !tc.result).length;
+    if (pending > 0) {
+      return {
+        label: `Calling tools (${pending} pending)`,
+        icon: 'codicon-tools',
+        type: 'tool-calling'
+      };
+    }
+  }
+  return { label: 'Thinking...', icon: 'codicon-loading codicon-modifier-spin', type: 'thinking' };
+});
+
+const toolCallCount = computed(() => {
+  return messages.value.reduce((sum, m) => sum + (m.toolCalls?.length || 0), 0);
+});
 
 function scrollToBottom() {
   nextTick(() => {
@@ -196,8 +225,9 @@ function addModel(provider) {
   testResult.value = null;
 }
 
-function deleteModel(model) {
-  if (!confirm(`确定要删除模型 "${model.displayName}" 吗？`)) return;
+async function deleteModel(model) {
+  const ok = await dialog.confirm(`确定要删除模型 "${model.displayName}" 吗？`, '删除模型');
+  if (!ok) return;
   agentStore.deleteModel(model.id);
   editingModel.value = agentStore.currentModel ? cloneModel(agentStore.currentModel) : null;
   if (agentStore.currentModel) {
@@ -206,13 +236,20 @@ function deleteModel(model) {
 }
 
 function setProvider(provider) {
-  if (!editingModel.value) return;
-  const id = editingModel.value.id;
-  const displayName = editingModel.value.displayName;
-  const base = createEmptyModel(provider);
-  base.id = id;
-  base.displayName = displayName;
-  editingModel.value = base;
+  if (!editingModel.value || editingModel.value.provider === provider) return;
+  const current = editingModel.value;
+  current.provider = provider;
+  // Ensure provider-specific defaults without discarding user edits
+  if (provider === 'anthropic') {
+    if (!current.baseUrl) current.baseUrl = 'https://api.anthropic.com';
+    if (!current.modelId) current.modelId = 'claude-3-5-sonnet-20241022';
+    if (!current.thinkingStrength) current.thinkingStrength = 'medium';
+  } else {
+    if (!current.baseUrl) current.baseUrl = 'https://api.openai.com/v1';
+    if (!current.modelId) current.modelId = 'gpt-4o';
+    if (!current.reasoningStrength) current.reasoningStrength = 'medium';
+    if (!current.endpoint) current.endpoint = '/v1/chat/completions';
+  }
 }
 
 async function saveConfig(testAfterSave = false) {
@@ -430,6 +467,16 @@ function getToolIcon(toolName) {
       </article>
     </div>
 
+    <div v-if="!collapsed" class="agent-status-bar">
+      <span class="agent-status-bar__badge" :class="`agent-status-bar__badge--${agentStatus.type}`">
+        <span class="codicon" :class="agentStatus.icon"></span>
+        {{ agentStatus.label }}
+      </span>
+      <span v-if="toolCallCount > 0" class="agent-status-bar__tools">
+        {{ toolCallCount }} tool call{{ toolCallCount === 1 ? '' : 's' }}
+      </span>
+    </div>
+
     <div v-if="!collapsed" class="composer agent-composer">
       <textarea
         v-model="input"
@@ -477,13 +524,13 @@ function getToolIcon(toolName) {
           <div v-if="editingModel" class="agent-config__layout">
             <!-- Left: model list -->
             <div class="agent-config__sidebar">
-              <div class="agent-config__sidebar-title">新增模型配置</div>
+              <div class="agent-config__sidebar-title">新增模型</div>
               <div class="agent-config__provider-tabs">
-                <button class="agent-config__provider-tab" :class="{ active: false }" @click="addModel('openai')">
-                  <span class="codicon codicon-globe"></span> OpenAI
+                <button class="agent-config__provider-tab" @click="addModel('openai')">
+                  <span class="codicon codicon-add"></span> OpenAI
                 </button>
-                <button class="agent-config__provider-tab" :class="{ active: false }" @click="addModel('anthropic')">
-                  <span class="codicon codicon-sparkle"></span> Anthropic
+                <button class="agent-config__provider-tab" @click="addModel('anthropic')">
+                  <span class="codicon codicon-add"></span> Anthropic
                 </button>
               </div>
               <div class="agent-config__model-list">
@@ -506,6 +553,7 @@ function getToolIcon(toolName) {
 
             <!-- Right: form -->
             <div class="agent-config__body">
+              <div class="agent-config__section-label">Provider 类型</div>
               <!-- Provider tabs -->
               <div class="agent-config__provider-tabs">
                 <button

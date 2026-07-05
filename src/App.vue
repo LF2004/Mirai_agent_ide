@@ -1,12 +1,12 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import SidebarExplorer from './components/SidebarExplorer.vue';
 import EditorTabs from './components/EditorTabs.vue';
 import MonacoEditorPanel from './components/MonacoEditorPanel.vue';
 import AgentPanel from './components/AgentPanel.vue';
-import ToolPanel from './components/ToolPanel.vue';
 import TerminalPanel from './components/TerminalPanel.vue';
+import IdeDialog from './components/IdeDialog.vue';
 import SearchPanel from './components/SearchPanel.vue';
 import ExtensionsPanel from './components/ExtensionsPanel.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
@@ -15,11 +15,15 @@ import { useWorkspaceStore } from './stores/workspace.js';
 import { useAgentStore } from './stores/agent.js';
 import { setLocale, t } from './utils/i18n.js';
 import { getDesktopApi } from './services/desktop.js';
+import { useDialogState } from './composables/useDialog.js';
 
 const desktopApi = getDesktopApi();
 
 const workspaceStore = useWorkspaceStore();
 const agentStore = useAgentStore();
+const dialogState = useDialogState();
+
+provide('ideDialog', { alert: showAlert, confirm: showConfirm });
 const {
   appInfo,
   recentProjects,
@@ -703,12 +707,12 @@ function handleWindowBlur() {
   }
 }
 
-function handleCloseFile(filePath) {
+async function handleCloseFile(filePath) {
   // Check if the file is dirty and prompt to save
   const file = openFiles.value.find((f) => f.path === filePath);
   if (file?.dirty) {
     const fileName = filePath.split(/[\\/]/).pop() || filePath;
-    const shouldSave = window.confirm(`"${fileName}" has unsaved changes. Save before closing?`);
+    const shouldSave = await showConfirm(`"${fileName}" has unsaved changes. Save before closing?`, 'Unsaved Changes');
     if (shouldSave) {
       workspaceStore.setActiveFile(filePath);
       workspaceStore.saveActiveFile().then(() => {
@@ -718,6 +722,39 @@ function handleCloseFile(filePath) {
     }
   }
   workspaceStore.closeFile(filePath);
+}
+
+function showAlert(message, title = '提示') {
+  dialogState.type = 'alert';
+  dialogState.title = title;
+  dialogState.message = message;
+  dialogState.resolve = (val) => { dialogState.visible = false; return val; };
+  dialogState.visible = true;
+}
+
+function showConfirm(message, title = '确认') {
+  return new Promise((resolve) => {
+    dialogState.type = 'confirm';
+    dialogState.title = title;
+    dialogState.message = message;
+    dialogState.resolve = (val) => {
+      dialogState.visible = false;
+      resolve(val);
+    };
+    dialogState.visible = true;
+  });
+}
+
+function handleDialogConfirm() {
+  if (dialogState.resolve) {
+    dialogState.resolve(true);
+  }
+}
+
+function handleDialogCancel() {
+  if (dialogState.resolve) {
+    dialogState.resolve(false);
+  }
 }
 
 function handleReorderFiles({ from, to }) {
@@ -1272,7 +1309,6 @@ onBeforeUnmount(() => {
               @mode-change="handleModeChange"
               @model-change="handleModelChange"
             />
-            <ToolPanel v-if="!isAgentCollapsed" :workspace-path="workspacePath" :has-workspace="hasWorkspace" />
           </section>
         </main>
       </div>
@@ -1391,6 +1427,17 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </Transition>
+
+      <!-- Global IDE Dialog (alert / confirm) -->
+      <IdeDialog
+        :visible="dialogState.visible"
+        :type="dialogState.type"
+        :title="dialogState.title"
+        :message="dialogState.message"
+        @confirm="handleDialogConfirm"
+        @cancel="handleDialogCancel"
+        @close="handleDialogCancel"
+      />
     </div>
   </div>
 </template>

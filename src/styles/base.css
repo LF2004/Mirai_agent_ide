@@ -419,15 +419,16 @@ button {
 }
 
 .agent-section {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) 260px;
+  display: flex;
+  flex-direction: column;
   border-left: 1px solid var(--border);
   background: var(--cursor-panel);
   overflow: hidden;
 }
 
 .agent-section.is-collapsed {
-  grid-template-rows: minmax(0, 1fr);
+  flex-direction: row;
+  justify-content: center;
 }
 
 .pane,
@@ -3279,6 +3280,15 @@ button {
   gap: 12px;
 }
 
+.agent-config__section-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: -6px;
+}
+
 .agent-config__label {
   display: inline-flex;
   align-items: center;
@@ -3386,5 +3396,154 @@ button {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+/* ===== IDE Dialog (alert / confirm) ===== */
+.ide-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.ide-dialog {
+  width: min(420px, calc(100vw - 40px));
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-panel, #1e1e1e);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ide-dialog__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ide-dialog__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.ide-dialog__close {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.ide-dialog__close:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.ide-dialog__body {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 16px;
+}
+
+.ide-dialog__icon {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(77, 141, 255, 0.12);
+  color: var(--accent);
+  font-size: 18px;
+}
+
+.ide-dialog__message {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-main);
+}
+
+.ide-dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.ide-dialog__footer .primary-button,
+.ide-dialog__footer .ghost-button,
+.ide-dialog__footer .danger-button {
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.ide-dialog-fade-enter-active,
+.ide-dialog-fade-leave-active {
+  transition: opacity 0.15s ease;
+}
+
+.ide-dialog-fade-enter-from,
+.ide-dialog-fade-leave-to {
+  opacity: 0;
+}
+
+/* ===== Agent status bar ===== */
+.agent-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.015);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.agent-status-bar__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-active);
+  color: var(--text-soft);
+}
+
+.agent-status-bar__badge--ready {
+  background: rgba(63, 185, 80, 0.12);
+  color: var(--success);
+}
+
+.agent-status-bar__badge--thinking {
+  background: rgba(77, 141, 255, 0.12);
+  color: var(--accent);
+}
+
+.agent-status-bar__badge--tool-calling {
+  background: rgba(255, 193, 69, 0.12);
+  color: var(--warning);
+}
+
+.agent-status-bar__tools {
+  color: var(--text-soft);
+  opacity: 0.8;
 }
 

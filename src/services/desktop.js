@@ -515,8 +515,8 @@ function buildMockApi() {
             maxOutputTokens: 4096,
             reasoningStrength: 'medium',
             endpoint: '/v1/chat/completions',
-            extraParams: {},
-            customHeaders: {},
+            extraParams: '',
+            customHeaders: '',
             extraParamsEnabled: false,
             customHeadersEnabled: false,
             notes: ''
