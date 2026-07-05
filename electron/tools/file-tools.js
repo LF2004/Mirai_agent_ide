@@ -210,13 +210,6 @@ function walkDirectory(rootPath, currentPath) {
         return 1;
       }
 
-      const leftCollapsed = left.type === 'directory' && isCollapsedDirectoryName(left.name);
-      const rightCollapsed = right.type === 'directory' && isCollapsedDirectoryName(right.name);
-
-      if (leftCollapsed !== rightCollapsed) {
-        return leftCollapsed ? 1 : -1;
-      }
-
       return FILE_TREE_COLLATOR.compare(left.name, right.name);
     });
 

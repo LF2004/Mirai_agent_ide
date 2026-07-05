@@ -3,11 +3,16 @@ import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { t } from '../utils/i18n.js';
 
 const props = defineProps({
   workspacePath: {
     type: String,
     default: ''
+  },
+  fontSize: {
+    type: Number,
+    default: 13
   }
 });
 
@@ -106,7 +111,7 @@ function bindTerminalEvents(instance) {
 onMounted(async () => {
   terminal.value = new Terminal({
     cursorBlink: true,
-    fontSize: 13,
+    fontSize: props.fontSize,
     fontFamily: 'Consolas, "Cascadia Code", monospace',
     theme: {
       background: 'var(--terminal-bg)',
@@ -157,6 +162,20 @@ watch(
     }
   }
 );
+
+watch(
+  () => props.fontSize,
+  (size) => {
+    if (terminal.value) {
+      terminal.value.options.fontSize = size;
+      resizeTerminal();
+    }
+  }
+);
+
+defineExpose({
+  createTerminalSession
+});
 </script>
 
 <template>
@@ -175,13 +194,13 @@ watch(
         </button>
       </div>
       <div class="terminal-panel__actions">
-        <button class="icon-button codicon codicon-add" title="New Terminal" @click="createTerminalSession"></button>
+        <button class="icon-button codicon codicon-add" :title="t('newTerminal')" @click="createTerminalSession"></button>
       </div>
     </div>
     <div class="terminal-panel__body">
       <div ref="terminalHostRef" class="terminal-host"></div>
       <div v-if="!terminalSessions.length" class="terminal-empty">
-        No terminal yet. Create one from the + button.
+        {{ t('noTerminalYet') }}
       </div>
     </div>
   </section>
