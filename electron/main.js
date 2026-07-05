@@ -4,6 +4,7 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { DatabaseService } from './services/database-service.js';
 import { WorkspaceTools } from './tools/workspace-tools.js';
 import { TerminalTools } from './tools/terminal-tools.js';
+import { ExtensionTools } from './tools/extension-tools.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,6 +13,7 @@ let mainWindow = null;
 let databaseService = null;
 let workspaceTools = null;
 let terminalTools = null;
+let extensionTools = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -43,6 +45,7 @@ async function bootstrapServices() {
   await databaseService.initialize();
   workspaceTools = new WorkspaceTools(databaseService);
   terminalTools = new TerminalTools();
+  extensionTools = new ExtensionTools(databaseService);
 }
 
 function registerIpcHandlers() {
@@ -119,8 +122,24 @@ function registerIpcHandlers() {
     return workspaceTools.deletePath(payload.workspacePath, payload.targetPath);
   });
 
+  ipcMain.handle('workspace:search', async (_, payload) => {
+    return workspaceTools.searchWorkspace(payload.workspacePath, payload.query, payload.includeFiles, payload.excludeFiles);
+  });
+
+  ipcMain.handle('workspace:replace', async (_, payload) => {
+    return workspaceTools.replaceWorkspace(payload.workspacePath, payload.query, payload.replaceText, payload.includeFiles, payload.excludeFiles);
+  });
+
   ipcMain.handle('settings:save', async (_, payload) => {
     return databaseService.saveSetting(payload.key, payload.value);
+  });
+
+  ipcMain.handle('extensions:list-installed', async () => {
+    return extensionTools.listInstalledExtensions();
+  });
+
+  ipcMain.handle('extensions:set-enabled', async (_, payload) => {
+    return extensionTools.setExtensionEnabled(payload.extensionId, payload.enabled);
   });
 
   ipcMain.handle('shell:show-item-in-folder', async (_, targetPath) => {

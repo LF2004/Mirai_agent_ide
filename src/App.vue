@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { storeToRefs } from 'pinia';
 import SidebarExplorer from './components/SidebarExplorer.vue';
 import EditorTabs from './components/EditorTabs.vue';
@@ -7,8 +7,11 @@ import MonacoEditorPanel from './components/MonacoEditorPanel.vue';
 import AgentPanel from './components/AgentPanel.vue';
 import ToolPanel from './components/ToolPanel.vue';
 import TerminalPanel from './components/TerminalPanel.vue';
+import SearchPanel from './components/SearchPanel.vue';
+import ExtensionsPanel from './components/ExtensionsPanel.vue';
+import SettingsPanel from './components/SettingsPanel.vue';
 import { useWorkspaceStore } from './stores/workspace.js';
-import { IDE_THEMES } from '../type/themes.js';
+import { setLocale, t } from './utils/i18n.js';
 
 const workspaceStore = useWorkspaceStore();
 const {
@@ -29,21 +32,138 @@ const {
   terminalFontSize,
   explorerCompactFolders,
   terminalShellIntegration,
+  locale: currentLocale,
   autoSave,
+  keybinds,
+  searchState,
+  searchResultsCount,
+  filteredExtensions,
+  extensionsState,
   isReady,
   bootError,
   logs
 } = storeToRefs(workspaceStore);
 
 const activeSidebar = ref('explorer');
+const isAgentCollapsed = ref(false);
 const draftProjectName = ref('mirai-demo');
 const explorerAction = ref(null);
 const explorerActionValue = ref('');
 const explorerActionInput = ref(null);
 const pendingDeleteNode = ref(null);
+const quickCommand = ref('');
+const terminalPanelRef = ref(null);
+const activeMenu = ref('');
+const menuRootRef = ref(null);
+const editorFocusLine = ref(0);
+
+const titleMenus = computed(() => [
+  {
+    id: 'file',
+    label: t('file'),
+    items: [
+      { label: t('openProject'), action: handleOpenProject },
+      { label: t('openRecentProject'), action: handleOpenRecentProject },
+      { label: t('newProject'), action: handleCreateProject },
+      { label: t('newFile'), action: () => requestCreateFile() },
+      { label: t('newFolder'), action: () => requestCreateFolder() },
+      { label: t('rename'), action: () => requestRenameNode(activeFile.value || fileTree.value) },
+      { label: t('deleteActive'), action: () => requestDeleteNode(activeFile.value) },
+      { label: t('saveFile'), action: handleSaveFile },
+      { label: t('saveAll'), action: async () => {
+        for (const file of openFiles.value) {
+          if (file.dirty && file.kind === 'text') {
+            activeFilePath.value = file.path;
+            await workspaceStore.saveActiveFile();
+          }
+        }
+      } },
+      { label: t('newTerminal'), action: handleNewTerminal }
+    ]
+  },
+  {
+    id: 'edit',
+    label: t('edit'),
+    items: [
+      { label: t('undo'), action: () => document.execCommand?.('undo') },
+      { label: t('redo'), action: () => document.execCommand?.('redo') },
+      { label: t('cut'), action: () => document.execCommand?.('cut') },
+      { label: t('copy'), action: () => document.execCommand?.('copy') },
+      { label: t('paste'), action: () => document.execCommand?.('paste') },
+      { label: t('selectAll'), action: () => document.execCommand?.('selectAll') },
+      { label: t('find'), action: focusEditor },
+      { label: t('replace'), action: focusEditor },
+      { label: t('quickCommand'), action: () => (quickCommand.value = '') },
+      { label: t('themeSettings'), action: () => (activeSidebar.value = 'settings') },
+      { label: t('extensions'), action: () => (activeSidebar.value = 'extensions') },
+      { label: t('toggleAgentPanel'), action: () => (isAgentCollapsed.value = !isAgentCollapsed.value) }
+    ]
+  },
+  {
+    id: 'view',
+    label: t('view'),
+    items: [
+      { label: t('explorer'), action: () => (activeSidebar.value = 'explorer') },
+      { label: t('search'), action: () => (activeSidebar.value = 'search') },
+      { label: t('extensions'), action: () => (activeSidebar.value = 'extensions') },
+      { label: t('agent'), action: () => (activeSidebar.value = 'agent') },
+      { label: t('settings'), action: () => (activeSidebar.value = 'settings') },
+      { label: isAgentCollapsed.value ? t('showAgentPanel') : t('hideAgentPanel'), action: () => (isAgentCollapsed.value = !isAgentCollapsed.value) }
+    ]
+  },
+  {
+    id: 'go',
+    label: t('go'),
+    items: [
+      { label: t('focusExplorer'), action: () => (activeSidebar.value = 'explorer') },
+      { label: t('focusEditor'), action: focusEditor },
+      { label: t('focusActiveFile'), action: focusEditor },
+      { label: t('focusTerminal'), action: () => document.querySelector('.xterm-helper-textarea')?.focus?.() }
+    ]
+  },
+  {
+    id: 'terminal',
+    label: t('terminal'),
+    items: [
+      { label: t('newTerminal'), action: handleNewTerminal },
+      { label: t('focusExplorer'), action: () => (activeSidebar.value = 'explorer') },
+      { label: t('toggleTerminal'), action: toggleTerminalPanel }
+    ]
+  },
+  {
+    id: 'window',
+    label: t('window'),
+    items: [
+      { label: t('toggleSidebar'), action: toggleSidebar },
+      { label: t('togglePanels'), action: togglePanels },
+      { label: t('collapseAgentPanel'), action: () => (isAgentCollapsed.value = true) },
+      { label: t('showAgentPanel'), action: () => (isAgentCollapsed.value = false) },
+      { label: t('zoomIn'), action: () => workspaceStore.appendLog('info', 'Zoom in not wired yet.') },
+      { label: t('zoomOut'), action: () => workspaceStore.appendLog('info', 'Zoom out not wired yet.') },
+      { label: t('resetZoom'), action: () => workspaceStore.appendLog('info', 'Zoom reset not wired yet.') }
+    ]
+  },
+  {
+    id: 'help',
+    label: t('help'),
+    items: [
+      { label: t('about'), action: () => workspaceStore.appendLog('info', 'Mirai Agent IDE shell is running.') },
+      { label: t('revealWorkspace'), action: () => workspaceStore.revealWorkspace() }
+    ]
+  }
+]);
+
+const menuRefreshKey = computed(() => currentLocale.value);
 
 const hasWorkspace = computed(() => Boolean(workspacePath.value));
-const currentFileLabel = computed(() => activeFilePath.value || 'No file opened');
+const currentFileLabel = computed(() => activeFilePath.value || t('noFileOpened'));
+const workspaceBreadcrumb = computed(() => {
+  if (!workspacePath.value) {
+  return t('notOpened');
+  }
+
+  return workspacePath.value.replace(/\\/g, '/').split('/').slice(-3).join(' / ');
+});
 
 function normalizePath(value) {
   return String(value || '').replace(/\\/g, '/').replace(/^\/+/, '');
@@ -85,6 +205,133 @@ async function handleSaveFile() {
   await workspaceStore.saveActiveFile();
 }
 
+function handleNewTerminal() {
+  terminalPanelRef.value?.createTerminalSession?.();
+}
+
+async function handleOpenRecentProject() {
+  const recentPath = recentProjects.value[0]?.path;
+  if (!recentPath) {
+    return;
+  }
+
+  await workspaceStore.openRecentProject(recentPath);
+}
+
+function focusEditor() {
+  document.querySelector('.cm-editor')?.focus?.();
+}
+
+function focusTerminal() {
+  document.querySelector('.xterm-helper-textarea')?.focus?.();
+}
+
+function toggleSidebar() {
+  activeSidebar.value = activeSidebar.value === 'explorer' ? 'settings' : 'explorer';
+}
+
+function togglePanels() {
+  activeSidebar.value = activeSidebar.value === 'agent' ? 'explorer' : 'agent';
+}
+
+function toggleTerminalPanel() {
+  const terminalRoot = document.querySelector('.terminal-panel');
+  if (terminalRoot) {
+    terminalRoot.hidden = !terminalRoot.hidden;
+  }
+}
+
+function normalizeShortcut(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace('cmd', 'ctrl');
+}
+
+function eventMatchesShortcut(event, shortcut) {
+  const normalized = normalizeShortcut(shortcut);
+  if (!normalized) {
+    return false;
+  }
+
+  const parts = normalized.split('+').filter(Boolean);
+  const key = parts.pop();
+  const requiresCtrl = parts.includes('ctrl');
+  const requiresShift = parts.includes('shift');
+  const requiresAlt = parts.includes('alt');
+
+  return Boolean(
+    key &&
+    (event.key.toLowerCase() === key || (key === '`' && event.code === 'Backquote')) &&
+    event.ctrlKey === requiresCtrl &&
+    event.shiftKey === requiresShift &&
+    event.altKey === requiresAlt
+  );
+}
+
+function toggleMenu(menuId) {
+  activeMenu.value = activeMenu.value === menuId ? '' : menuId;
+}
+
+function closeMenu() {
+  activeMenu.value = '';
+}
+
+async function runMenuAction(action) {
+  closeMenu();
+  await action?.();
+}
+
+function handleGlobalPointerDown(event) {
+  if (!menuRootRef.value?.contains(event.target)) {
+    closeMenu();
+  }
+}
+
+async function changeLocale(value) {
+  await workspaceStore.setLocale(value);
+  setLocale(value);
+}
+
+function handleMenuKeydown(event) {
+  if (event.key === 'Escape') {
+    closeMenu();
+  }
+
+  if (eventMatchesShortcut(event, keybinds.value.search)) {
+    event.preventDefault();
+    activeSidebar.value = 'search';
+    closeMenu();
+  }
+
+  if (eventMatchesShortcut(event, keybinds.value.replace)) {
+    event.preventDefault();
+    activeSidebar.value = 'search';
+    searchState.value.replaceExpanded = true;
+    closeMenu();
+  }
+
+  if (eventMatchesShortcut(event, keybinds.value.saveFile)) {
+    event.preventDefault();
+    handleSaveFile();
+  }
+
+  if (eventMatchesShortcut(event, keybinds.value.openProject)) {
+    event.preventDefault();
+    handleOpenProject();
+  }
+
+  if (eventMatchesShortcut(event, keybinds.value.newFile)) {
+    event.preventDefault();
+    requestCreateFile();
+  }
+
+  if (eventMatchesShortcut(event, keybinds.value.terminal)) {
+    event.preventDefault();
+    handleNewTerminal();
+  }
+}
+
 function openExplorerAction(action, defaultValue) {
   explorerAction.value = action;
   explorerActionValue.value = defaultValue;
@@ -95,24 +342,32 @@ function openExplorerAction(action, defaultValue) {
 }
 
 function requestCreateFile(node = null) {
+  if (!hasWorkspace.value) {
+    return;
+  }
+
   const parentPath = parentPathFor(node);
   openExplorerAction(
     {
       type: 'create-file',
       title: 'New File',
-      label: 'File path'
+      label: t('filePath')
     },
     joinPath(parentPath, 'new-file.js')
   );
 }
 
 function requestCreateFolder(node = null) {
+  if (!hasWorkspace.value) {
+    return;
+  }
+
   const parentPath = parentPathFor(node);
   openExplorerAction(
     {
       type: 'create-folder',
       title: 'New Folder',
-      label: 'Folder path'
+      label: t('folderPath')
     },
     joinPath(parentPath, 'new-folder')
   );
@@ -127,7 +382,7 @@ function requestRenameNode(node) {
     {
       type: 'rename',
       title: 'Rename',
-      label: 'New path',
+      label: t('rename'),
       node
     },
     normalizePath(node.path)
@@ -195,8 +450,74 @@ function handleCloseFile(filePath) {
   workspaceStore.closeFile(filePath);
 }
 
+async function handleSearchResultSelect(result) {
+  if (!result?.path) {
+    return;
+  }
+
+  editorFocusLine.value = 0;
+  await workspaceStore.openFile(result.path);
+  await nextTick();
+  editorFocusLine.value = Number(result.lineNumber) || 0;
+}
+
+async function handleSearchRun(payload) {
+  searchState.value.replaceExpanded = Boolean(payload?.replaceExpanded);
+  await workspaceStore.runSearch(payload);
+}
+
+async function handleReplaceRun(payload) {
+  searchState.value.query = payload?.query || searchState.value.query;
+  searchState.value.replace = payload?.replace || searchState.value.replace;
+  searchState.value.includeFiles = payload?.includeFiles || searchState.value.includeFiles;
+  searchState.value.excludeFiles = payload?.excludeFiles || searchState.value.excludeFiles;
+  searchState.value.replaceExpanded = true;
+  await workspaceStore.replaceInSearchResults();
+  await workspaceStore.runSearch({
+    query: searchState.value.query,
+    replace: searchState.value.replace,
+    includeFiles: searchState.value.includeFiles,
+    excludeFiles: searchState.value.excludeFiles,
+    replaceExpanded: true
+  });
+}
+
+async function handleRevealPath(targetPath) {
+  if (!targetPath) {
+    return;
+  }
+
+  await workspaceStore.revealWorkspace(targetPath);
+}
+
+async function handleQuickCommand() {
+  const command = quickCommand.value.trim().toLowerCase();
+  if (!command) {
+    return;
+  }
+
+  if (command.includes('open')) {
+    await handleOpenProject();
+  } else if (command.includes('new project')) {
+    await handleCreateProject();
+  } else if (command.includes('save')) {
+    await handleSaveFile();
+  } else if (command.includes('terminal')) {
+    handleNewTerminal();
+  }
+
+  quickCommand.value = '';
+}
+
 onMounted(async () => {
   await workspaceStore.bootstrap();
+  document.addEventListener('pointerdown', handleGlobalPointerDown);
+  document.addEventListener('keydown', handleMenuKeydown);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', handleGlobalPointerDown);
+  document.removeEventListener('keydown', handleMenuKeydown);
 });
 </script>
 
@@ -217,6 +538,12 @@ onMounted(async () => {
           @click="activeSidebar = 'search'"
         ></button>
         <button
+          class="activitybar__item codicon codicon-extensions"
+          :class="{ 'is-active': activeSidebar === 'extensions' }"
+          title="Extensions"
+          @click="activeSidebar = 'extensions'"
+        ></button>
+        <button
           class="activitybar__item codicon codicon-hubot"
           :class="{ 'is-active': activeSidebar === 'agent' }"
           title="Agent"
@@ -230,24 +557,30 @@ onMounted(async () => {
         ></button>
       </nav>
 
-      <header class="titlebar">
+      <header class="titlebar" ref="menuRootRef" :key="menuRefreshKey">
         <div class="titlebar__left">
           <strong class="titlebar__logo">{{ appInfo.name }}</strong>
-          <button class="menu-button">File</button>
-          <button class="menu-button">Edit</button>
-          <button class="menu-button">Selection</button>
-          <button class="menu-button">View</button>
-          <button class="menu-button">Go</button>
-          <button class="menu-button">Run</button>
-          <button class="menu-button">Terminal</button>
-          <button class="menu-button">Help</button>
+          <div class="titlebar__menus">
+            <div v-for="menu in titleMenus" :key="menu.id" class="titlebar__menu">
+              <button class="menu-button" :class="{ 'is-active': activeMenu === menu.id }" @click="toggleMenu(menu.id)">
+                {{ menu.label }}
+              </button>
+              <div v-if="activeMenu === menu.id" class="titlebar-menu">
+                <button
+                  v-for="item in menu.items"
+                  :key="item.label"
+                  class="titlebar-menu__item"
+                  @click="runMenuAction(item.action)"
+                >
+                  {{ item.label }}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="titlebar__center">{{ workspaceName || 'Mirai Agent IDE' }}</div>
-        <div class="titlebar__actions">
-          <button class="ghost-button" @click="handleOpenProject">Open Project</button>
-          <button class="primary-button" @click="handleCreateProject">New Project</button>
-          <button class="ghost-button" @click="workspaceStore.revealWorkspace()">Reveal</button>
-          <input v-model="draftProjectName" class="titlebar__input" placeholder="Project name" />
+        <div class="titlebar__center">
+          <span class="titlebar__workspace">{{ workspaceName || t('appName') }}</span>
+          <span class="titlebar__breadcrumb">{{ workspaceBreadcrumb }}</span>
         </div>
       </header>
 
@@ -270,108 +603,64 @@ onMounted(async () => {
             @delete-node="requestDeleteNode"
           />
 
-          <div v-else-if="activeSidebar === 'settings'" class="settings-pane">
-            <div class="pane__header">SETTINGS</div>
-            <section class="settings-section">
-              <p class="pane__label">Appearance</p>
-              <h3>Theme</h3>
-              <p class="pane__hint">UI and editor syntax colors switch together.</p>
-              <div class="theme-list">
-                <button
-                  v-for="theme in IDE_THEMES"
-                  :key="theme.id"
-                  class="theme-option"
-                  :class="{ 'is-active': theme.id === activeTheme }"
-                  @click="workspaceStore.setTheme(theme.id)"
-                >
-                  <span class="theme-option__swatch" :data-theme-preview="theme.id"></span>
-                  <span>{{ theme.name }}</span>
-                  <span v-if="theme.id === activeTheme" class="codicon codicon-check"></span>
-                </button>
-              </div>
-            </section>
+          <SearchPanel
+            v-else-if="activeSidebar === 'search'"
+            :workspace-path="workspacePath"
+            :search-state="searchState"
+            :results-count="searchResultsCount"
+            @run-search="handleSearchRun"
+            @run-replace="handleReplaceRun"
+            @undo-last="workspaceStore.undoLastAction"
+            @select-result="handleSearchResultSelect"
+          />
 
-            <section class="settings-section">
-              <p class="pane__label">Editor</p>
-              <h3>Typography</h3>
-              <div class="settings-field">
-                <label>Font family</label>
-                <input
-                  :value="editorFontFamily"
-                  class="settings-input"
-                  @change="workspaceStore.setEditorFontFamily($event.target.value)"
-                />
-              </div>
-              <div class="settings-field">
-                <label>Font size</label>
-                <input
-                  type="range"
-                  min="11"
-                  max="20"
-                  :value="editorFontSize"
-                  @input="workspaceStore.setEditorFontSize($event.target.value)"
-                />
-                <span>{{ editorFontSize }} px</span>
-              </div>
-              <div class="settings-field">
-                <label>Auto save</label>
-                <select :value="autoSave" class="settings-input" @change="workspaceStore.setAutoSave($event.target.value)">
-                  <option value="off">Off</option>
-                  <option value="afterDelay">After delay</option>
-                  <option value="onFocusChange">On focus change</option>
-                </select>
-              </div>
-            </section>
+          <ExtensionsPanel
+            v-else-if="activeSidebar === 'extensions'"
+            :extensions="filteredExtensions"
+            :loading="extensionsState.loading"
+            :query="extensionsState.query"
+            @update:query="workspaceStore.setExtensionQuery"
+            @refresh="workspaceStore.loadInstalledExtensions"
+            @toggle-enabled="workspaceStore.setExtensionEnabled($event.id, !$event.enabled)"
+            @reveal-extension="handleRevealPath"
+          />
 
-            <section class="settings-section">
-              <p class="pane__label">Explorer / Terminal</p>
-              <h3>Workspace</h3>
-              <div class="settings-field settings-field--stack">
-                <label>
-                  <input
-                    type="checkbox"
-                    :checked="explorerCompactFolders"
-                    @change="workspaceStore.setExplorerCompactFolders($event.target.checked)"
-                  />
-                  Compact folders
-                </label>
-                <label>
-                  <input
-                    type="checkbox"
-                    :checked="terminalShellIntegration"
-                    @change="workspaceStore.setTerminalShellIntegration($event.target.checked)"
-                  />
-                  Terminal shell integration
-                </label>
-              </div>
-              <div class="settings-field">
-                <label>Terminal font size</label>
-                <input
-                  type="range"
-                  min="11"
-                  max="18"
-                  :value="terminalFontSize"
-                  @input="workspaceStore.setTerminalFontSize($event.target.value)"
-                />
-                <span>{{ terminalFontSize }} px</span>
-              </div>
-            </section>
-          </div>
+          <SettingsPanel
+            v-else-if="activeSidebar === 'settings'"
+            :current-locale="currentLocale"
+            :active-theme="activeTheme"
+            :editor-font-size="editorFontSize"
+            :editor-font-family="editorFontFamily"
+            :terminal-font-size="terminalFontSize"
+            :explorer-compact-folders="explorerCompactFolders"
+            :terminal-shell-integration="terminalShellIntegration"
+            :auto-save="autoSave"
+            :keybinds="keybinds"
+            @set-theme="workspaceStore.setTheme"
+            @set-locale="changeLocale"
+            @set-editor-font-family="workspaceStore.setEditorFontFamily"
+            @set-editor-font-size="workspaceStore.setEditorFontSize"
+            @set-auto-save="workspaceStore.setAutoSave"
+            @set-compact-folders="workspaceStore.setExplorerCompactFolders"
+            @set-shell-integration="workspaceStore.setTerminalShellIntegration"
+            @set-terminal-font-size="workspaceStore.setTerminalFontSize"
+            @set-keybind="workspaceStore.setKeybind"
+          />
 
           <div v-else class="sidebar-placeholder">
-            <p class="pane__label">{{ activeSidebar === 'search' ? 'SEARCH' : 'AGENT' }}</p>
-            <h3>{{ activeSidebar === 'search' ? 'Project Search' : 'Agent View' }}</h3>
+            <p class="pane__label">{{ activeSidebar === 'extensions' ? t('extensions') : t('agent') }}</p>
+            <h3>{{ activeSidebar === 'extensions' ? t('extensions') : t('agent') }}</h3>
             <p class="pane__hint">
               {{
-                activeSidebar === 'search'
-                  ? 'Project-wide search, filename search, and symbol search will live here.'
-                  : 'Conversation history, task trees, and agent configuration will live here.'
+                activeSidebar === 'extensions'
+                  ? t('extensionsHint')
+                  : t('agentViewHint')
               }}
             </p>
           </div>
         </aside>
 
-        <main class="editor-layout">
+        <main class="editor-layout" :class="{ 'is-agent-collapsed': isAgentCollapsed }">
           <section class="editor-section">
             <EditorTabs
               :open-files="openFiles"
@@ -385,31 +674,34 @@ onMounted(async () => {
               :content="activeFileContent"
               :font-size="editorFontSize"
               :font-family="editorFontFamily"
+              :focus-line="editorFocusLine"
               @change="handleEditorChange"
               @save="handleSaveFile"
             />
-            <TerminalPanel :workspace-path="workspacePath" />
+            <TerminalPanel ref="terminalPanelRef" :workspace-path="workspacePath" :font-size="terminalFontSize" />
           </section>
 
-          <section class="agent-section">
+          <section class="agent-section" :class="{ 'is-collapsed': isAgentCollapsed }">
             <AgentPanel
               :mode="activeMode"
               :model="selectedModel"
               :current-file="currentFileLabel"
+              :collapsed="isAgentCollapsed"
+              @toggle-collapse="isAgentCollapsed = !isAgentCollapsed"
               @mode-change="handleModeChange"
               @model-change="handleModelChange"
             />
-            <ToolPanel :workspace-path="workspacePath" :has-workspace="hasWorkspace" />
+            <ToolPanel v-if="!isAgentCollapsed" :workspace-path="workspacePath" :has-workspace="hasWorkspace" />
           </section>
         </main>
       </div>
 
       <footer class="statusbar">
-        <span>{{ workspacePath || 'No workspace selected' }}</span>
-        <span>Mode: {{ activeMode }}</span>
-        <span>Model: {{ selectedModel }}</span>
-        <span>File: {{ currentFileLabel }}</span>
-        <span v-if="bootError" class="statusbar__error">Bridge error: {{ bootError }}</span>
+        <span>{{ workspacePath || t('noWorkspaceSelected') }}</span>
+        <span>{{ t('mode') }}: {{ activeMode }}</span>
+        <span>{{ t('model') }}: {{ selectedModel }}</span>
+        <span>{{ t('currentFileHint') }}: {{ currentFileLabel }}</span>
+        <span v-if="bootError" class="statusbar__error">{{ t('bridgeError') }}: {{ bootError }}</span>
       </footer>
 
       <div v-if="explorerAction" class="ide-modal-backdrop" @click.self="closeExplorerAction">
@@ -420,19 +712,19 @@ onMounted(async () => {
             <input ref="explorerActionInput" v-model="explorerActionValue" class="ide-modal__input" />
           </label>
           <div class="ide-modal__actions">
-            <button type="button" class="ghost-button" @click="closeExplorerAction">Cancel</button>
-            <button type="submit" class="primary-button">Apply</button>
+            <button type="button" class="ghost-button" @click="closeExplorerAction">{{ t('cancel') }}</button>
+            <button type="submit" class="primary-button">{{ t('apply') }}</button>
           </div>
         </form>
       </div>
 
       <div v-if="pendingDeleteNode" class="ide-modal-backdrop" @click.self="pendingDeleteNode = null">
         <div class="ide-modal">
-          <h3>Delete</h3>
-          <p>Delete "{{ pendingDeleteNode.path }}"? This cannot be undone.</p>
+          <h3>{{ t('delete') }}</h3>
+          <p>{{ t('deletePrompt').replace('{path}', pendingDeleteNode.path) }}</p>
           <div class="ide-modal__actions">
-            <button type="button" class="ghost-button" @click="pendingDeleteNode = null">Cancel</button>
-            <button type="button" class="danger-button" @click="confirmDeleteNode">Delete</button>
+            <button type="button" class="ghost-button" @click="pendingDeleteNode = null">{{ t('cancel') }}</button>
+            <button type="button" class="danger-button" @click="confirmDeleteNode">{{ t('delete') }}</button>
           </div>
         </div>
       </div>

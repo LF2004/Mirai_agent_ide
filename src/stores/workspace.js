@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { APP_MODES, DEFAULT_MODEL } from '../../type/models.js';
 import { DEFAULT_THEME, IDE_SETTINGS_DEFAULTS } from '../../type/themes.js';
 import { getDesktopApi } from '../services/desktop.js';
+import { LOCALES, setLocale } from '../utils/i18n.js';
 
 const desktopApi = getDesktopApi();
 
@@ -11,6 +12,10 @@ function fileNameFromPath(filePath) {
 
 function isSameOrChildPath(candidate, parentPath) {
   return candidate === parentPath || candidate.startsWith(`${parentPath}/`) || candidate.startsWith(`${parentPath}\\`);
+}
+
+function cloneValue(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
 export const useWorkspaceStore = defineStore('workspace', {
@@ -37,6 +42,31 @@ export const useWorkspaceStore = defineStore('workspace', {
     explorerCompactFolders: IDE_SETTINGS_DEFAULTS.explorerCompactFolders,
     terminalShellIntegration: IDE_SETTINGS_DEFAULTS.terminalShellIntegration,
     autoSave: IDE_SETTINGS_DEFAULTS.autoSave,
+    locale: IDE_SETTINGS_DEFAULTS.locale,
+    searchState: {
+      query: '',
+      replace: '',
+      includeFiles: '*.js,*.vue,*.ts,*.json',
+      excludeFiles: 'node_modules,dist,.git',
+      replaceExpanded: false,
+      results: []
+    },
+    extensionsState: {
+      installed: [],
+      query: '',
+      loading: false
+    },
+    keybinds: {
+      openProject: 'Ctrl+O',
+      newFile: 'Ctrl+N',
+      saveFile: 'Ctrl+S',
+      search: 'Ctrl+Shift+F',
+      replace: 'Ctrl+Shift+H',
+      terminal: 'Ctrl+`',
+      undo: 'Ctrl+Z',
+      redo: 'Ctrl+Y'
+    },
+    historyStack: [],
     logs: [
       {
         id: 'boot-log',
@@ -51,9 +81,118 @@ export const useWorkspaceStore = defineStore('workspace', {
     },
     activeFileContent() {
       return this.activeFile?.content || '';
+    },
+    searchResultsCount(state) {
+      return state.searchState.results.length;
+    },
+    filteredExtensions(state) {
+      const query = String(state.extensionsState.query || '').trim().toLowerCase();
+      if (!query) {
+        return state.extensionsState.installed;
+      }
+
+      return state.extensionsState.installed.filter((extension) =>
+        [
+          extension.name,
+          extension.id,
+          extension.description,
+          extension.publisher,
+          ...(extension.categories || [])
+        ]
+          .join(' ')
+          .toLowerCase()
+          .includes(query)
+      );
     }
   },
   actions: {
+    pushHistory(entry) {
+      this.historyStack.unshift({
+        id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+        timestamp: new Date().toISOString(),
+        ...entry
+      });
+      this.historyStack = this.historyStack.slice(0, 80);
+    },
+    recordFileHistory(type, payload) {
+      this.pushHistory({
+        type,
+        payload: cloneValue(payload)
+      });
+    },
+    async undoLastAction() {
+      const entry = this.historyStack.shift();
+      if (!entry) {
+        return;
+      }
+
+      if (entry.type === 'create-file' || entry.type === 'create-folder') {
+        await desktopApi.deletePath?.({
+          workspacePath: this.workspacePath,
+          targetPath: entry.payload.path
+        });
+      }
+
+      if (entry.type === 'delete-path') {
+        if (entry.payload.kind === 'file') {
+          await desktopApi.createFile?.({
+            workspacePath: this.workspacePath,
+            relativePath: entry.payload.path
+          });
+          await desktopApi.writeFile?.({
+            workspacePath: this.workspacePath,
+            filePath: entry.payload.path,
+            content: entry.payload.content || ''
+          });
+        }
+
+        if (entry.payload.kind === 'folder') {
+          await desktopApi.createFolder?.({
+            workspacePath: this.workspacePath,
+            relativePath: entry.payload.path
+          });
+        }
+
+        if (Array.isArray(entry.payload.children)) {
+          for (const child of entry.payload.children) {
+            if (child.kind === 'file') {
+              await desktopApi.createFile?.({
+                workspacePath: this.workspacePath,
+                relativePath: child.path
+              });
+              await desktopApi.writeFile?.({
+                workspacePath: this.workspacePath,
+                filePath: child.path,
+                content: child.content || ''
+              });
+            } else {
+              await desktopApi.createFolder?.({
+                workspacePath: this.workspacePath,
+                relativePath: child.path
+              });
+            }
+          }
+        }
+      }
+
+      if (entry.type === 'rename-path') {
+        await desktopApi.renamePath?.({
+          workspacePath: this.workspacePath,
+          oldPath: entry.payload.newPath,
+          newPath: entry.payload.oldPath
+        });
+      }
+
+      if (entry.type === 'write-file') {
+        await desktopApi.writeFile?.({
+          workspacePath: this.workspacePath,
+          filePath: entry.payload.path,
+          content: entry.payload.beforeContent || ''
+        });
+      }
+
+      await this.refreshFileTree();
+    },
     appendLog(level, message) {
       this.logs.unshift({
         id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
@@ -76,6 +215,20 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.explorerCompactFolders = payload.settings.explorerCompactFolders ?? IDE_SETTINGS_DEFAULTS.explorerCompactFolders;
         this.terminalShellIntegration = payload.settings.terminalShellIntegration ?? IDE_SETTINGS_DEFAULTS.terminalShellIntegration;
         this.autoSave = payload.settings.autoSave || IDE_SETTINGS_DEFAULTS.autoSave;
+        this.locale = payload.settings.locale || IDE_SETTINGS_DEFAULTS.locale;
+        this.keybinds = {
+          ...this.keybinds,
+          openProject: payload.settings['keybind.openProject'] || this.keybinds.openProject,
+          newFile: payload.settings['keybind.newFile'] || this.keybinds.newFile,
+          saveFile: payload.settings['keybind.saveFile'] || this.keybinds.saveFile,
+          search: payload.settings['keybind.search'] || this.keybinds.search,
+          replace: payload.settings['keybind.replace'] || this.keybinds.replace,
+          terminal: payload.settings['keybind.terminal'] || this.keybinds.terminal,
+          undo: payload.settings['keybind.undo'] || this.keybinds.undo,
+          redo: payload.settings['keybind.redo'] || this.keybinds.redo
+        };
+        setLocale(this.locale);
+        await this.loadInstalledExtensions();
         this.appendLog('success', 'Desktop bridge connected.');
       } catch (error) {
         this.bootError = error?.message || String(error);
@@ -182,6 +335,13 @@ export const useWorkspaceStore = defineStore('workspace', {
         return;
       }
 
+      if (!target.dirty) {
+        this.recordFileHistory('write-file', {
+          path: target.path,
+          beforeContent: target.content
+        });
+      }
+
       target.content = content;
       target.dirty = true;
     },
@@ -222,6 +382,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         relativePath
       });
 
+      this.recordFileHistory('create-file', { path: relativePath });
       await this.refreshFileTree();
       await this.openFile(relativePath);
       this.appendLog('success', `Created file: ${relativePath}`);
@@ -236,6 +397,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         relativePath
       });
 
+      this.recordFileHistory('create-folder', { path: relativePath });
       await this.refreshFileTree();
       this.appendLog('success', `Created folder: ${relativePath}`);
     },
@@ -246,6 +408,11 @@ export const useWorkspaceStore = defineStore('workspace', {
 
       await desktopApi.renamePath({
         workspacePath: this.workspacePath,
+        oldPath,
+        newPath
+      });
+
+      this.recordFileHistory('rename-path', {
         oldPath,
         newPath
       });
@@ -272,6 +439,21 @@ export const useWorkspaceStore = defineStore('workspace', {
       await desktopApi.deletePath({
         workspacePath: this.workspacePath,
         targetPath
+      });
+
+      const deletedSnapshots = this.openFiles
+        .filter((file) => isSameOrChildPath(file.path, targetPath))
+        .map((file) => ({
+          kind: file.kind,
+          path: file.path,
+          content: file.content
+        }));
+
+      this.recordFileHistory('delete-path', {
+        path: targetPath,
+        kind: deletedSnapshots.length ? 'folder' : 'file',
+        children: deletedSnapshots.length ? deletedSnapshots : null,
+        content: deletedSnapshots[0]?.content || ''
       });
 
       this.openFiles = this.openFiles.filter((file) => !isSameOrChildPath(file.path, targetPath));
@@ -354,12 +536,109 @@ export const useWorkspaceStore = defineStore('workspace', {
         value: mode
       });
     },
-    async revealWorkspace() {
-      if (!this.workspacePath || this.workspacePath.startsWith('mock://')) {
+    async setLocale(value) {
+      this.locale = value === LOCALES.EN ? LOCALES.EN : LOCALES.ZH;
+      setLocale(this.locale);
+      await desktopApi.saveSetting?.({
+        key: 'locale',
+        value: this.locale
+      });
+    },
+    setExtensionQuery(value) {
+      this.extensionsState.query = String(value || '');
+    },
+    async loadInstalledExtensions() {
+      this.extensionsState.loading = true;
+      try {
+        const extensions = await desktopApi.listInstalledExtensions?.();
+        this.extensionsState.installed = Array.isArray(extensions) ? extensions : [];
+      } catch (error) {
+        this.appendLog('error', `Extensions load failed: ${error?.message || error}`);
+        this.extensionsState.installed = [];
+      } finally {
+        this.extensionsState.loading = false;
+      }
+    },
+    async setExtensionEnabled(extensionId, enabled) {
+      if (!extensionId) {
         return;
       }
 
-      await desktopApi.showItemInFolder(this.workspacePath);
+      await desktopApi.setExtensionEnabled?.({
+        extensionId,
+        enabled
+      });
+
+      this.extensionsState.installed = this.extensionsState.installed.map((extension) =>
+        extension.id === extensionId ? { ...extension, enabled: Boolean(enabled) } : extension
+      );
+    },
+    async setKeybind(action, value) {
+      if (!action) {
+        return;
+      }
+
+      this.keybinds = {
+        ...this.keybinds,
+        [action]: String(value || '').trim()
+      };
+
+      await desktopApi.saveSetting?.({
+        key: `keybind.${action}`,
+        value: this.keybinds[action]
+      });
+    },
+    async runSearch(query, replaceText = '') {
+      const nextQuery = typeof query === 'object' && query !== null ? query.query : query;
+      const nextReplace = typeof query === 'object' && query !== null ? query.replace : replaceText;
+      const nextInclude = typeof query === 'object' && query !== null ? query.includeFiles : this.searchState.includeFiles;
+      const nextExclude = typeof query === 'object' && query !== null ? query.excludeFiles : this.searchState.excludeFiles;
+      const q = String(nextQuery || '').trim();
+      this.searchState.query = q;
+      this.searchState.replace = String(nextReplace || '');
+      this.searchState.includeFiles = String(nextInclude || '');
+      this.searchState.excludeFiles = String(nextExclude || '');
+      this.searchState.results = [];
+
+      if (!q || !this.workspacePath) {
+        return [];
+      }
+
+      const matches = await desktopApi.searchWorkspace?.({
+        workspacePath: this.workspacePath,
+        query: q,
+        replaceText: this.searchState.replace,
+        includeFiles: this.searchState.includeFiles,
+        excludeFiles: this.searchState.excludeFiles
+      });
+
+      this.searchState.results = Array.isArray(matches) ? matches : [];
+      return this.searchState.results;
+    },
+    async replaceInSearchResults() {
+      if (!this.searchState.query || !this.workspacePath) {
+        return [];
+      }
+
+      const changes = await desktopApi.replaceWorkspace?.({
+        workspacePath: this.workspacePath,
+        query: this.searchState.query,
+        replaceText: this.searchState.replace,
+        includeFiles: this.searchState.includeFiles,
+        excludeFiles: this.searchState.excludeFiles
+      });
+
+      await this.refreshFileTree();
+      this.appendLog('success', `Replace completed for: ${this.searchState.query}`);
+      return Array.isArray(changes) ? changes : [];
+    },
+    async revealWorkspace(targetPath = '') {
+      const resolvedTarget = targetPath || this.workspacePath;
+      if (!resolvedTarget || resolvedTarget.startsWith('mock://')) {
+        return;
+      }
+
+      await desktopApi.showItemInFolder(resolvedTarget);
     }
   }
 });

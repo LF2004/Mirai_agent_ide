@@ -70,6 +70,26 @@ export class DatabaseService {
     return { recentProjects, settings };
   }
 
+  getSetting(key, fallbackValue = null) {
+    const row = this.database
+      .prepare(`
+        SELECT value
+        FROM settings
+        WHERE key = ?
+      `)
+      .get(key);
+
+    if (!row) {
+      return fallbackValue;
+    }
+
+    try {
+      return JSON.parse(row.value);
+    } catch {
+      return row.value ?? fallbackValue;
+    }
+  }
+
   saveRecentProject(project) {
     this.database
       .prepare(`

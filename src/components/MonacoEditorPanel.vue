@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { EditorState, Compartment } from '@codemirror/state';
+import { EditorState, Compartment, EditorSelection } from '@codemirror/state';
 import {
   EditorView,
   crosshairCursor,
@@ -32,6 +32,7 @@ import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { sql } from '@codemirror/lang-sql';
 import { vue } from '@codemirror/lang-vue';
+import { t } from '../utils/i18n.js';
 
 const props = defineProps({
   filePath: {
@@ -53,6 +54,10 @@ const props = defineProps({
   fontFamily: {
     type: String,
     default: 'Cascadia Code'
+  },
+  focusLine: {
+    type: Number,
+    default: 0
   }
 });
 
@@ -272,6 +277,19 @@ async function focusEditor() {
   editorView.value?.focus();
 }
 
+function revealLine(lineNumber) {
+  if (!editorView.value || !lineNumber) {
+    return;
+  }
+
+  const line = editorView.value.state.doc.line(Math.min(Math.max(1, lineNumber), editorView.value.state.doc.lines));
+  editorView.value.dispatch({
+    selection: EditorSelection.cursor(line.from),
+    scrollIntoView: true
+  });
+  editorView.value.focus();
+}
+
 onMounted(() => {
   editorView.value = new EditorView({
     state: createState(props.content || ''),
@@ -318,21 +336,30 @@ watch(
     replaceDocument(content);
   }
 );
+
+watch(
+  () => props.focusLine,
+  (lineNumber) => {
+    if (lineNumber) {
+      revealLine(lineNumber);
+    }
+  }
+);
 </script>
 
 <template>
   <div class="editor-panel">
     <div class="editor-panel__toolbar">
-      <span>{{ filePath || 'Select a file to start editing' }}</span>
+      <span>{{ filePath || t('selectFileToEdit') }}</span>
       <div class="editor-panel__actions">
-        <span class="editor-panel__hint">Ctrl/Cmd+S save, Ctrl+F search, Tab indent</span>
-        <button class="ghost-button" @click="$emit('save')" :disabled="emptyState || isImageFile">Save</button>
+        <span class="editor-panel__hint">{{ t('saveHint') }}</span>
+        <button class="ghost-button" @click="$emit('save')" :disabled="emptyState || isImageFile">{{ t('saveFile') }}</button>
       </div>
     </div>
     <div class="editor-panel__body">
       <div v-show="emptyState" class="editor-empty">
         <h3>Mirai Agent IDE</h3>
-        <p>Open a file from Explorer or create a new project to begin.</p>
+        <p>{{ t('openFileToBegin') }}</p>
       </div>
       <div v-if="isImageFile" class="image-preview">
         <div class="image-preview__frame">

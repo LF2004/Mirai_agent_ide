@@ -1,5 +1,6 @@
 <script setup>
 import { resolveSetiIcon } from '../utils/seti-icons.js';
+import { t } from '../utils/i18n.js';
 
 defineProps({
   openFiles: {
@@ -38,6 +39,6 @@ function iconStyle(name) {
       </button>
       <button class="editor-tab__close codicon codicon-close" @click="$emit('close', file.path)"></button>
     </div>
-    <div v-if="openFiles.length === 0" class="editor-tab editor-tab--placeholder">No open files</div>
+    <div v-if="openFiles.length === 0" class="editor-tab editor-tab--placeholder">{{ t('noOpenFiles') }}</div>
   </div>
 </template>

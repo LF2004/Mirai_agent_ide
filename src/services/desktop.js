@@ -227,12 +227,99 @@ function buildMockApi() {
         path: payload.targetPath
       };
     },
+    async searchWorkspace(payload) {
+      const query = String(payload?.query || '').trim().toLowerCase();
+      if (!query) {
+        return [];
+      }
+
+      const includeFiles = String(payload?.includeFiles || '*').toLowerCase();
+      const excludeFiles = String(payload?.excludeFiles || '').toLowerCase();
+      const results = [];
+
+      for (const [filePath, content] of files.entries()) {
+        const lowerPath = filePath.toLowerCase();
+        if (excludeFiles && excludeFiles.split(',').some((item) => item.trim() && lowerPath.includes(item.trim().replace(/^\*\./, '.').replace(/^\*/, '')))) {
+          continue;
+        }
+        if (includeFiles !== '*' && includeFiles && !lowerPath.endsWith(includeFiles.replace('*', ''))) {
+          continue;
+        }
+
+        String(content || '')
+          .split(/\r?\n/)
+          .forEach((line, index) => {
+            if (line.toLowerCase().includes(query)) {
+              results.push({
+                path: filePath,
+                lineNumber: index + 1,
+                preview: line.trim()
+              });
+            }
+          });
+      }
+
+      return results;
+    },
+    async replaceWorkspace(payload) {
+      const results = await this.searchWorkspace(payload);
+      const query = String(payload?.query || '');
+      const replaceText = String(payload?.replaceText || '');
+
+      if (!query) {
+        return [];
+      }
+
+      const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+      const updated = [];
+
+      for (const result of results) {
+        const current = files.get(result.path) || '';
+        const next = current.replace(pattern, replaceText);
+        if (next !== current) {
+          files.set(result.path, next);
+          updated.push({ path: result.path });
+        }
+      }
+
+      return updated;
+    },
     async saveSetting(payload) {
       inMemoryWorkspace.settings[payload.key] = payload.value;
       return {
         success: true,
         key: payload.key,
         value: payload.value
+      };
+    },
+    async listInstalledExtensions() {
+      return [
+        {
+          id: 'mock.theme-dark',
+          name: 'Mock Dark Theme',
+          description: 'Mock VS Code extension for preview mode.',
+          version: '0.0.1',
+          publisher: 'mirai',
+          categories: ['Themes'],
+          rootPath: 'mock://extensions',
+          path: 'mock://extensions/mock-theme-dark',
+          enabled: true,
+          icon: '',
+          engine: '^1.90.0',
+          contributes: {
+            themes: 1,
+            grammars: 0,
+            languages: 0,
+            commands: 0
+          }
+        }
+      ];
+    },
+    async setExtensionEnabled(payload) {
+      return {
+        success: true,
+        id: payload.extensionId,
+        enabled: Boolean(payload.enabled)
       };
     },
     async listTerminals() {
