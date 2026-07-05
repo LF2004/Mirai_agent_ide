@@ -1,0 +1,9 @@
+.idea/
+node_modules/
+dist/
+release/
+release-temp/
+.DS_Store
+*.log
+*.db
+*.sqlite
