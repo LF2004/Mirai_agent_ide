@@ -1,9 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { shell } from 'electron';
 import {
   createWorkspaceFile,
   createWorkspaceFolder,
   deleteWorkspacePath,
+  snapshotWorkspacePath,
   getFileTree,
   isCollapsedDirectoryName,
   readWorkspaceFile,
@@ -84,6 +86,20 @@ export class WorkspaceTools {
     return writeWorkspaceFile(workspacePath, filePath, content);
   }
 
+  /**
+   * Write a binary file from a base64 data URL (used by undo to restore images, etc.)
+   */
+  writeBinaryFile(workspacePath, filePath, dataUrl) {
+    const absolutePath = resolveInsideWorkspace(workspacePath, filePath);
+    fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+
+    const base64Data = String(dataUrl || '').replace(/^data:[^;]+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+    fs.writeFileSync(absolutePath, buffer);
+
+    return { success: true, path: filePath };
+  }
+
   createFile(workspacePath, relativePath) {
     return createWorkspaceFile(workspacePath, relativePath);
   }
@@ -98,6 +114,37 @@ export class WorkspaceTools {
 
   deletePath(workspacePath, targetPath) {
     return deleteWorkspacePath(workspacePath, targetPath);
+  }
+
+  /**
+   * Snapshot all files under targetPath so the renderer can undo the delete.
+   */
+  snapshotPath(workspacePath, targetPath) {
+    return snapshotWorkspacePath(workspacePath, targetPath);
+  }
+
+  /**
+   * Move a file/folder to the OS trash (recycle bin) instead of permanently deleting.
+   * Falls back to permanent deletion if trash is unavailable.
+   */
+  async trashPath(workspacePath, targetPath) {
+    if (!targetPath || targetPath === '.') {
+      throw new Error('Deleting the workspace root is not allowed.');
+    }
+
+    const absolutePath = resolveInsideWorkspace(workspacePath, targetPath);
+    if (!fs.existsSync(absolutePath)) {
+      return { success: true, path: targetPath, trashed: false };
+    }
+
+    try {
+      await shell.trashItem(absolutePath);
+      return { success: true, path: targetPath, trashed: true };
+    } catch (error) {
+      // Fallback: permanent delete if trash fails (e.g. on some network drives)
+      deleteWorkspacePath(workspacePath, targetPath);
+      return { success: true, path: targetPath, trashed: false, fallback: true };
+    }
   }
 
   searchWorkspace(workspacePath, query, includeFiles = '*', excludeFiles = '') {

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import FileTreeNode from './FileTreeNode.vue';
 import { t } from '../utils/i18n.js';
 
@@ -23,6 +23,10 @@ const props = defineProps({
   activeFilePath: {
     type: String,
     default: ''
+  },
+  inlineEdit: {
+    type: Object,
+    default: null
   }
 });
 
@@ -34,13 +38,26 @@ const emit = defineEmits([
   'select-node',
   'open-recent',
   'rename-node',
-  'delete-node'
+  'delete-node',
+  'inline-confirm',
+  'inline-cancel'
 ]);
 
 const explorerExpanded = ref(true);
 const recentExpanded = ref(true);
 const contextMenu = ref(null);
+const rootInlineInputRef = ref(null);
+const rootInlineValue = ref('');
 const hasWorkspace = computed(() => Boolean(props.workspacePath));
+
+// Root-level inline edit: when creating at workspace root (targetPath is empty)
+const isRootInlineEdit = computed(() => {
+  if (!props.inlineEdit) {
+    return false;
+  }
+  return (props.inlineEdit.type === 'create-file' || props.inlineEdit.type === 'create-folder')
+    && (!props.inlineEdit.targetPath || props.inlineEdit.targetPath === '.');
+});
 
 function toggleSection(section) {
   if (section === 'explorer') {
@@ -76,6 +93,24 @@ function runContextAction(action) {
     emit('create-folder', node);
   }
 
+  if (action === 'open') {
+    emit('select-node', node);
+  }
+
+  if (action === 'copy-path') {
+    const fullPath = props.workspacePath + '/' + node.path;
+    navigator.clipboard?.writeText?.(fullPath);
+  }
+
+  if (action === 'copy-relative-path') {
+    navigator.clipboard?.writeText?.(node.path);
+  }
+
+  if (action === 'reveal') {
+    const fullPath = props.workspacePath + '/' + node.path;
+    emit('select-node', { type: 'reveal', path: fullPath });
+  }
+
   if (action === 'rename') {
     emit('rename-node', node);
   }
@@ -84,6 +119,28 @@ function runContextAction(action) {
     emit('delete-node', node);
   }
 }
+
+function handleRootInlineConfirm() {
+  emit('inline-confirm', rootInlineValue.value);
+  rootInlineValue.value = '';
+}
+
+function handleRootInlineCancel() {
+  emit('inline-cancel');
+  rootInlineValue.value = '';
+}
+
+// Watch for root inline edit becoming active to focus the input
+watch(isRootInlineEdit, (active) => {
+  if (active) {
+    const defaultName = props.inlineEdit.type === 'create-file' ? 'newfile.js' : 'new-folder';
+    rootInlineValue.value = defaultName;
+    nextTick(() => {
+      rootInlineInputRef.value?.focus();
+      rootInlineInputRef.value?.select();
+    });
+  }
+});
 
 onBeforeUnmount(() => {
   window.removeEventListener('click', closeContextMenu);
@@ -115,15 +172,35 @@ onBeforeUnmount(() => {
       </button>
 
       <div v-if="explorerExpanded" class="file-tree">
-        <template v-if="tree?.children?.length">
+        <template v-if="tree?.children?.length || isRootInlineEdit">
+          <div v-if="isRootInlineEdit" class="tree-node tree-node--inline-root">
+            <div class="tree-node__label tree-node__label--inline">
+              <span class="tree-node__twistie"></span>
+              <span
+                class="tree-node__icon codicon"
+                :class="inlineEdit.type === 'create-folder' ? 'codicon-new-folder' : 'codicon-new-file'"
+              ></span>
+              <input
+                ref="rootInlineInputRef"
+                v-model="rootInlineValue"
+                class="tree-node__input"
+                @keydown.enter.prevent="handleRootInlineConfirm"
+                @keydown.escape.prevent="handleRootInlineCancel"
+                @blur="handleRootInlineConfirm"
+              />
+            </div>
+          </div>
           <FileTreeNode
             v-for="child in tree.children"
             :key="child.path"
             :node="child"
             :active-file-path="activeFilePath"
+            :inline-edit="inlineEdit"
             :depth="0"
             @select-node="$emit('select-node', $event)"
             @node-menu="openContextMenu"
+            @inline-confirm="$emit('inline-confirm', $event)"
+            @inline-cancel="$emit('inline-cancel')"
           />
         </template>
         <div v-else class="empty-tree">
@@ -166,6 +243,24 @@ onBeforeUnmount(() => {
       <button v-if="contextMenu.node.type === 'directory'" @click="runContextAction('new-folder')">
         <span class="codicon codicon-new-folder"></span>
         {{ t('newFolder') }}
+      </button>
+      <button v-if="contextMenu.node.type === 'file'" @click="runContextAction('open')">
+        <span class="codicon codicon-go-to-file"></span>
+        {{ t('openToSide') }}
+      </button>
+      <div class="context-menu__separator"></div>
+      <button @click="runContextAction('copy-path')">
+        <span class="codicon codicon-clippy"></span>
+        {{ t('copyPath') }}
+      </button>
+      <button @click="runContextAction('copy-relative-path')">
+        <span class="codicon codicon-copy"></span>
+        {{ t('copyRelativePath') }}
+      </button>
+      <div class="context-menu__separator"></div>
+      <button @click="runContextAction('reveal')">
+        <span class="codicon codicon-folder"></span>
+        {{ t('revealInExplorer') }}
       </button>
       <button @click="runContextAction('rename')">
         <span class="codicon codicon-edit"></span>

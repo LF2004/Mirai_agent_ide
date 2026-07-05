@@ -28,5 +28,14 @@ export const IDE_SETTINGS_DEFAULTS = {
   terminalFontSize: 13,
   explorerCompactFolders: true,
   terminalShellIntegration: true,
-  autoSave: 'off'
+  autoSave: 'off',
+  locale: 'zh',
+  wordWrap: false,
+  tabSize: 2,
+  lineNumbers: true,
+  minimap: false,
+  renderWhitespace: 'none',
+  bracketPairColorization: true,
+  cursorBlinking: 'blink',
+  smoothScrolling: false
 };

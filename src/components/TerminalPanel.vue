@@ -13,8 +13,18 @@ const props = defineProps({
   fontSize: {
     type: Number,
     default: 13
+  },
+  collapsed: {
+    type: Boolean,
+    default: false
+  },
+  height: {
+    type: Number,
+    default: 180
   }
 });
+
+const emit = defineEmits(['toggle-collapse', 'update:height']);
 
 const terminalHostRef = ref(null);
 const terminal = ref(null);
@@ -22,7 +32,36 @@ const fitAddon = ref(null);
 const terminalSessions = ref([]);
 const activeTerminalId = ref('');
 const resizeObserver = ref(null);
+const panelRef = ref(null);
+const isResizing = ref(false);
 let refreshTimer = null;
+
+function toggleCollapse() {
+  emit('toggle-collapse');
+}
+
+function startResize(event) {
+  event.preventDefault();
+  isResizing.value = true;
+  const startY = event.clientY;
+  const startHeight = props.height;
+
+  function onMouseMove(moveEvent) {
+    const delta = startY - moveEvent.clientY;
+    const nextHeight = Math.max(80, Math.min(600, startHeight + delta));
+    emit('update:height', nextHeight);
+  }
+
+  function onMouseUp() {
+    isResizing.value = false;
+    window.removeEventListener('mousemove', onMouseMove);
+    window.removeEventListener('mouseup', onMouseUp);
+    resizeTerminal();
+  }
+
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mouseup', onMouseUp);
+}
 
 async function refreshTerminals() {
   const sessions = await window.mirai?.listTerminals?.();
@@ -61,6 +100,20 @@ async function closeTerminal(terminalId) {
   }
 }
 
+function clearTerminal() {
+  if (!terminal.value) {
+    return;
+  }
+  terminal.value.clear();
+}
+
+async function killTerminal() {
+  if (!activeTerminalId.value) {
+    return;
+  }
+  await closeTerminal(activeTerminalId.value);
+}
+
 async function attachTerminal(terminalId) {
   if (!terminal.value) {
     return;
@@ -84,6 +137,9 @@ async function pumpTerminalOutput() {
 }
 
 function resizeTerminal() {
+  if (props.collapsed || !terminal.value) {
+    return;
+  }
   try {
     fitAddon.value?.fit();
   } catch (error) {
@@ -173,13 +229,36 @@ watch(
   }
 );
 
+watch(
+  () => props.collapsed,
+  async (collapsed) => {
+    if (!collapsed) {
+      await nextTick();
+      resizeTerminal();
+      if (activeTerminalId.value) {
+        await attachTerminal(activeTerminalId.value);
+      }
+    }
+  }
+);
+
+watch(
+  () => props.height,
+  async () => {
+    await nextTick();
+    resizeTerminal();
+  }
+);
+
 defineExpose({
-  createTerminalSession
+  createTerminalSession,
+  clearTerminal,
+  killTerminal
 });
 </script>
 
 <template>
-  <section class="terminal-panel">
+  <section ref="panelRef" class="terminal-panel" :class="{ 'is-collapsed': collapsed }" :style="{ height: collapsed ? 'auto' : `${height}px` }">
     <div class="terminal-panel__header">
       <div class="terminal-panel__tabs">
         <button
@@ -195,13 +274,25 @@ defineExpose({
       </div>
       <div class="terminal-panel__actions">
         <button class="icon-button codicon codicon-add" :title="t('newTerminal')" @click="createTerminalSession"></button>
+        <button
+          class="icon-button"
+          :class="collapsed ? 'codicon codicon-chevron-up' : 'codicon codicon-chevron-down'"
+          :title="collapsed ? t('expand') : t('closePanel')"
+          @click="toggleCollapse"
+        ></button>
       </div>
     </div>
-    <div class="terminal-panel__body">
+    <div v-show="!collapsed" class="terminal-panel__body">
       <div ref="terminalHostRef" class="terminal-host"></div>
       <div v-if="!terminalSessions.length" class="terminal-empty">
         {{ t('noTerminalYet') }}
       </div>
     </div>
+    <div
+      v-show="!collapsed"
+      class="terminal-panel__resize-handle"
+      :class="{ 'is-resizing': isResizing }"
+      @mousedown="startResize"
+    ></div>
   </section>
 </template>

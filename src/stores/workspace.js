@@ -43,6 +43,14 @@ export const useWorkspaceStore = defineStore('workspace', {
     terminalShellIntegration: IDE_SETTINGS_DEFAULTS.terminalShellIntegration,
     autoSave: IDE_SETTINGS_DEFAULTS.autoSave,
     locale: IDE_SETTINGS_DEFAULTS.locale,
+    wordWrap: IDE_SETTINGS_DEFAULTS.wordWrap,
+    tabSize: IDE_SETTINGS_DEFAULTS.tabSize,
+    lineNumbers: IDE_SETTINGS_DEFAULTS.lineNumbers,
+    minimap: IDE_SETTINGS_DEFAULTS.minimap,
+    renderWhitespace: IDE_SETTINGS_DEFAULTS.renderWhitespace,
+    bracketPairColorization: IDE_SETTINGS_DEFAULTS.bracketPairColorization,
+    cursorBlinking: IDE_SETTINGS_DEFAULTS.cursorBlinking,
+    smoothScrolling: IDE_SETTINGS_DEFAULTS.smoothScrolling,
     searchState: {
       query: '',
       replace: '',
@@ -54,7 +62,12 @@ export const useWorkspaceStore = defineStore('workspace', {
     extensionsState: {
       installed: [],
       query: '',
-      loading: false
+      loading: false,
+      marketplaceResults: [],
+      marketplaceQuery: '',
+      marketplaceLoading: false,
+      activeTab: 'installed',
+      installingIds: {}
     },
     keybinds: {
       openProject: 'Ctrl+O',
@@ -67,6 +80,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       redo: 'Ctrl+Y'
     },
     historyStack: [],
+    redoStack: [],
     logs: [
       {
         id: 'boot-log',
@@ -119,79 +133,235 @@ export const useWorkspaceStore = defineStore('workspace', {
         type,
         payload: cloneValue(payload)
       });
+      // New user actions invalidate the redo history
+      this.redoStack = [];
     },
     async undoLastAction() {
       const entry = this.historyStack.shift();
       if (!entry) {
-        return;
+        this.appendLog('info', 'Undo: nothing to undo.');
+        return false;
       }
 
-      if (entry.type === 'create-file' || entry.type === 'create-folder') {
-        await desktopApi.deletePath?.({
-          workspacePath: this.workspacePath,
-          targetPath: entry.payload.path
-        });
+      this.appendLog('info', `Undo: ${entry.type} — ${entry.payload?.path || ''}`);
+      let success = true;
+      const redoPayload = cloneValue(entry.payload);
+
+      try {
+        if (entry.type === 'create-file' || entry.type === 'create-folder') {
+          await desktopApi.deletePath?.({
+            workspacePath: this.workspacePath,
+            targetPath: entry.payload.path
+          });
+          // Redo: recreate the file/folder
+          this.redoStack.unshift({ type: entry.type, payload: redoPayload });
+        }
+
+        if (entry.type === 'delete-path') {
+          const snapshot = entry.payload.snapshot || entry.payload.children || [];
+          this.appendLog('info', `Undo delete: restoring ${snapshot.length} item(s).`);
+
+          for (const item of snapshot) {
+            try {
+              if (item.isDirectory) {
+                await desktopApi.createFolder?.({
+                  workspacePath: this.workspacePath,
+                  relativePath: item.path
+                });
+              } else {
+                await desktopApi.createFile?.({
+                  workspacePath: this.workspacePath,
+                  relativePath: item.path
+                });
+                if (item.isBinary && item.dataUrl) {
+                  // Binary file restored from base64 snapshot
+                  await desktopApi.writeBinaryFile?.({
+                    workspacePath: this.workspacePath,
+                    filePath: item.path,
+                    dataUrl: item.dataUrl
+                  });
+                } else {
+                  await desktopApi.writeFile?.({
+                    workspacePath: this.workspacePath,
+                    filePath: item.path,
+                    content: item.content || ''
+                  });
+                }
+              }
+            } catch (itemError) {
+              this.appendLog('error', `Undo: failed to restore ${item.path}: ${itemError?.message || itemError}`);
+              success = false;
+            }
+          }
+
+          // If no snapshot existed (e.g. empty file that had no content read), still recreate it
+          if (snapshot.length === 0 && entry.payload.kind === 'file') {
+            try {
+              await desktopApi.createFile?.({
+                workspacePath: this.workspacePath,
+                relativePath: entry.payload.path
+              });
+            } catch (createError) {
+              this.appendLog('error', `Undo: failed to recreate file ${entry.payload.path}: ${createError?.message || createError}`);
+              success = false;
+            }
+          }
+
+          // Redo: delete the same path again
+          this.redoStack.unshift({ type: 'delete-path', payload: { path: entry.payload.path, kind: entry.payload.kind } });
+        }
+
+        if (entry.type === 'rename-path') {
+          await desktopApi.renamePath?.({
+            workspacePath: this.workspacePath,
+            oldPath: entry.payload.newPath,
+            newPath: entry.payload.oldPath
+          });
+          // Redo: forward rename
+          this.redoStack.unshift({
+            type: 'rename-path',
+            payload: { oldPath: entry.payload.oldPath, newPath: entry.payload.newPath }
+          });
+        }
+
+        if (entry.type === 'write-file') {
+          // Capture current content so redo can restore it
+          let currentContent = '';
+          try {
+            const readResult = await desktopApi.readFile?.({
+              workspacePath: this.workspacePath,
+              filePath: entry.payload.path
+            });
+            currentContent = readResult?.content || '';
+          } catch {
+            currentContent = this.activeFile?.path === entry.payload.path ? this.activeFile?.content : '';
+          }
+
+          await desktopApi.writeFile?.({
+            workspacePath: this.workspacePath,
+            filePath: entry.payload.path,
+            content: entry.payload.beforeContent || ''
+          });
+
+          // Redo: restore the content that existed before undo
+          this.redoStack.unshift({
+            type: 'write-file',
+            payload: { path: entry.payload.path, beforeContent: currentContent }
+          });
+
+          // Update active editor content if the file is open
+          const openFile = this.openFiles.find((file) => file.path === entry.payload.path);
+          if (openFile) {
+            openFile.content = entry.payload.beforeContent || '';
+            openFile.dirty = false;
+          }
+        }
+      } catch (error) {
+        this.appendLog('error', `Undo failed: ${error?.message || error}`);
+        success = false;
       }
 
-      if (entry.type === 'delete-path') {
-        if (entry.payload.kind === 'file') {
+      // Always refresh the tree so the UI reflects whatever state we ended up in
+      try {
+        await this.refreshFileTree();
+      } catch (refreshError) {
+        this.appendLog('error', `Undo: refreshFileTree failed: ${refreshError?.message || refreshError}`);
+      }
+
+      if (success) {
+        this.appendLog('success', 'Undo completed.');
+      }
+      return success;
+    },
+
+    async redoLastAction() {
+      const entry = this.redoStack.shift();
+      if (!entry) {
+        this.appendLog('info', 'Redo: nothing to redo.');
+        return false;
+      }
+
+      this.appendLog('info', `Redo: ${entry.type} — ${entry.payload?.path || ''}`);
+      let success = true;
+
+      try {
+        if (entry.type === 'create-file') {
           await desktopApi.createFile?.({
             workspacePath: this.workspacePath,
             relativePath: entry.payload.path
           });
-          await desktopApi.writeFile?.({
-            workspacePath: this.workspacePath,
-            filePath: entry.payload.path,
-            content: entry.payload.content || ''
-          });
         }
 
-        if (entry.payload.kind === 'folder') {
+        if (entry.type === 'create-folder') {
           await desktopApi.createFolder?.({
             workspacePath: this.workspacePath,
             relativePath: entry.payload.path
           });
         }
 
-        if (Array.isArray(entry.payload.children)) {
-          for (const child of entry.payload.children) {
-            if (child.kind === 'file') {
-              await desktopApi.createFile?.({
-                workspacePath: this.workspacePath,
-                relativePath: child.path
-              });
-              await desktopApi.writeFile?.({
-                workspacePath: this.workspacePath,
-                filePath: child.path,
-                content: child.content || ''
-              });
-            } else {
-              await desktopApi.createFolder?.({
-                workspacePath: this.workspacePath,
-                relativePath: child.path
-              });
-            }
+        if (entry.type === 'delete-path') {
+          await desktopApi.deletePath?.({
+            workspacePath: this.workspacePath,
+            targetPath: entry.payload.path
+          });
+
+          this.openFiles = this.openFiles.filter((file) => !isSameOrChildPath(file.path, entry.payload.path));
+          if (isSameOrChildPath(this.activeFilePath, entry.payload.path)) {
+            this.activeFilePath = this.openFiles[0]?.path || '';
           }
         }
+
+        if (entry.type === 'rename-path') {
+          await desktopApi.renamePath?.({
+            workspacePath: this.workspacePath,
+            oldPath: entry.payload.oldPath,
+            newPath: entry.payload.newPath
+          });
+
+          for (const file of this.openFiles) {
+            if (isSameOrChildPath(file.path, entry.payload.oldPath)) {
+              file.path = file.path.replace(entry.payload.oldPath, entry.payload.newPath);
+              file.name = fileNameFromPath(file.path);
+            }
+          }
+
+          if (isSameOrChildPath(this.activeFilePath, entry.payload.oldPath)) {
+            this.activeFilePath = this.activeFilePath.replace(entry.payload.oldPath, entry.payload.newPath);
+          }
+        }
+
+        if (entry.type === 'write-file') {
+          await desktopApi.writeFile?.({
+            workspacePath: this.workspacePath,
+            filePath: entry.payload.path,
+            content: entry.payload.beforeContent || ''
+          });
+
+          const openFile = this.openFiles.find((file) => file.path === entry.payload.path);
+          if (openFile) {
+            openFile.content = entry.payload.beforeContent || '';
+            openFile.dirty = false;
+          }
+        }
+      } catch (error) {
+        this.appendLog('error', `Redo failed: ${error?.message || error}`);
+        success = false;
       }
 
-      if (entry.type === 'rename-path') {
-        await desktopApi.renamePath?.({
-          workspacePath: this.workspacePath,
-          oldPath: entry.payload.newPath,
-          newPath: entry.payload.oldPath
-        });
+      try {
+        await this.refreshFileTree();
+      } catch (refreshError) {
+        this.appendLog('error', `Redo: refreshFileTree failed: ${refreshError?.message || refreshError}`);
       }
 
-      if (entry.type === 'write-file') {
-        await desktopApi.writeFile?.({
-          workspacePath: this.workspacePath,
-          filePath: entry.payload.path,
-          content: entry.payload.beforeContent || ''
-        });
+      if (success) {
+        this.appendLog('success', 'Redo completed.');
       }
+      return success;
+    },
 
-      await this.refreshFileTree();
+    clearRedoStack() {
+      this.redoStack = [];
     },
     appendLog(level, message) {
       this.logs.unshift({
@@ -216,6 +386,14 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.terminalShellIntegration = payload.settings.terminalShellIntegration ?? IDE_SETTINGS_DEFAULTS.terminalShellIntegration;
         this.autoSave = payload.settings.autoSave || IDE_SETTINGS_DEFAULTS.autoSave;
         this.locale = payload.settings.locale || IDE_SETTINGS_DEFAULTS.locale;
+        this.wordWrap = payload.settings.wordWrap ?? IDE_SETTINGS_DEFAULTS.wordWrap;
+        this.tabSize = payload.settings.tabSize || IDE_SETTINGS_DEFAULTS.tabSize;
+        this.lineNumbers = payload.settings.lineNumbers ?? IDE_SETTINGS_DEFAULTS.lineNumbers;
+        this.minimap = payload.settings.minimap ?? IDE_SETTINGS_DEFAULTS.minimap;
+        this.renderWhitespace = payload.settings.renderWhitespace || IDE_SETTINGS_DEFAULTS.renderWhitespace;
+        this.bracketPairColorization = payload.settings.bracketPairColorization ?? IDE_SETTINGS_DEFAULTS.bracketPairColorization;
+        this.cursorBlinking = payload.settings.cursorBlinking || IDE_SETTINGS_DEFAULTS.cursorBlinking;
+        this.smoothScrolling = payload.settings.smoothScrolling ?? IDE_SETTINGS_DEFAULTS.smoothScrolling;
         this.keybinds = {
           ...this.keybinds,
           openProject: payload.settings['keybind.openProject'] || this.keybinds.openProject,
@@ -335,6 +513,17 @@ export const useWorkspaceStore = defineStore('workspace', {
         return;
       }
 
+      // Non-text files (images, etc.) should never be marked as dirty
+      // from editor content changes — they are read-only in the editor.
+      if (target.kind !== 'text') {
+        return;
+      }
+
+      // Skip if content hasn't actually changed (prevents false dirty on tab switches)
+      if (target.content === content) {
+        return;
+      }
+
       if (!target.dirty) {
         this.recordFileHistory('write-file', {
           path: target.path,
@@ -355,6 +544,20 @@ export const useWorkspaceStore = defineStore('workspace', {
 
       if (this.activeFilePath === filePath) {
         this.activeFilePath = this.openFiles[index - 1]?.path || this.openFiles[index]?.path || '';
+      }
+    },
+    closeOthers(keepPath) {
+      this.openFiles = this.openFiles.filter((file) => file.path === keepPath);
+      this.activeFilePath = keepPath;
+    },
+    closeAllFiles() {
+      this.openFiles = [];
+      this.activeFilePath = '';
+    },
+    closeSavedFiles() {
+      this.openFiles = this.openFiles.filter((file) => file.dirty);
+      if (!this.openFiles.find((file) => file.path === this.activeFilePath)) {
+        this.activeFilePath = this.openFiles[0]?.path || '';
       }
     },
     async saveActiveFile() {
@@ -431,31 +634,45 @@ export const useWorkspaceStore = defineStore('workspace', {
       await this.refreshFileTree();
       this.appendLog('success', `Renamed: ${oldPath} -> ${newPath}`);
     },
-    async deletePath(targetPath) {
+    async deletePath(targetPath, options = {}) {
       if (!this.workspacePath || !targetPath) {
         return;
       }
 
-      await desktopApi.deletePath({
-        workspacePath: this.workspacePath,
-        targetPath
-      });
+      // Snapshot file contents before deletion so we can undo
+      let snapshot = [];
+      try {
+        snapshot = await desktopApi.snapshotPath?.({
+          workspacePath: this.workspacePath,
+          targetPath
+        }) || [];
+      } catch {
+        snapshot = [];
+      }
 
-      const deletedSnapshots = this.openFiles
-        .filter((file) => isSameOrChildPath(file.path, targetPath))
-        .map((file) => ({
-          kind: file.kind,
-          path: file.path,
-          content: file.content
-        }));
+      // Use trash (recycle bin) by default, fall back to permanent delete
+      const useTrash = options.useTrash !== false;
+      if (useTrash && desktopApi.trashPath) {
+        await desktopApi.trashPath({
+          workspacePath: this.workspacePath,
+          targetPath
+        });
+      } else {
+        await desktopApi.deletePath({
+          workspacePath: this.workspacePath,
+          targetPath
+        });
+      }
+
+      const isFolder = snapshot.some((entry) => entry.isDirectory) || snapshot.length > 1;
 
       this.recordFileHistory('delete-path', {
         path: targetPath,
-        kind: deletedSnapshots.length ? 'folder' : 'file',
-        children: deletedSnapshots.length ? deletedSnapshots : null,
-        content: deletedSnapshots[0]?.content || ''
+        kind: isFolder ? 'folder' : 'file',
+        snapshot
       });
 
+      // Close any open editors that were inside the deleted path
       this.openFiles = this.openFiles.filter((file) => !isSameOrChildPath(file.path, targetPath));
       if (isSameOrChildPath(this.activeFilePath, targetPath)) {
         this.activeFilePath = this.openFiles[0]?.path || '';
@@ -544,6 +761,38 @@ export const useWorkspaceStore = defineStore('workspace', {
         value: this.locale
       });
     },
+    async setWordWrap(value) {
+      this.wordWrap = Boolean(value);
+      await desktopApi.saveSetting?.({ key: 'wordWrap', value: this.wordWrap });
+    },
+    async setTabSize(value) {
+      this.tabSize = Number(value) || IDE_SETTINGS_DEFAULTS.tabSize;
+      await desktopApi.saveSetting?.({ key: 'tabSize', value: this.tabSize });
+    },
+    async setLineNumbers(value) {
+      this.lineNumbers = Boolean(value);
+      await desktopApi.saveSetting?.({ key: 'lineNumbers', value: this.lineNumbers });
+    },
+    async setMinimap(value) {
+      this.minimap = Boolean(value);
+      await desktopApi.saveSetting?.({ key: 'minimap', value: this.minimap });
+    },
+    async setRenderWhitespace(value) {
+      this.renderWhitespace = String(value || 'none');
+      await desktopApi.saveSetting?.({ key: 'renderWhitespace', value: this.renderWhitespace });
+    },
+    async setBracketPairColorization(value) {
+      this.bracketPairColorization = Boolean(value);
+      await desktopApi.saveSetting?.({ key: 'bracketPairColorization', value: this.bracketPairColorization });
+    },
+    async setCursorBlinking(value) {
+      this.cursorBlinking = String(value || 'blink');
+      await desktopApi.saveSetting?.({ key: 'cursorBlinking', value: this.cursorBlinking });
+    },
+    async setSmoothScrolling(value) {
+      this.smoothScrolling = Boolean(value);
+      await desktopApi.saveSetting?.({ key: 'smoothScrolling', value: this.smoothScrolling });
+    },
     setExtensionQuery(value) {
       this.extensionsState.query = String(value || '');
     },
@@ -572,6 +821,93 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.extensionsState.installed = this.extensionsState.installed.map((extension) =>
         extension.id === extensionId ? { ...extension, enabled: Boolean(enabled) } : extension
       );
+    },
+    setExtensionTab(tab) {
+      this.extensionsState.activeTab = tab;
+    },
+    setMarketplaceQuery(value) {
+      this.extensionsState.marketplaceQuery = String(value || '');
+    },
+    async searchMarketplace(query = '') {
+      const q = typeof query === 'string' ? query : this.extensionsState.marketplaceQuery;
+      this.extensionsState.marketplaceQuery = q;
+      this.extensionsState.marketplaceLoading = true;
+      try {
+        const results = await desktopApi.searchMarketplace?.({ query: q, pageSize: 50 });
+        // Mark which results are already installed
+        const installedIds = new Set(this.extensionsState.installed.map((ext) => ext.id.toLowerCase()));
+        this.extensionsState.marketplaceResults = (Array.isArray(results) ? results : []).map((ext) => ({
+          ...ext,
+          isInstalled: installedIds.has((ext.extensionId || ext.id || '').toLowerCase())
+        }));
+      } catch (error) {
+        this.appendLog('error', `Marketplace search failed: ${error?.message || error}`);
+        this.extensionsState.marketplaceResults = [];
+      } finally {
+        this.extensionsState.marketplaceLoading = false;
+      }
+    },
+    async installExtension(extensionId) {
+      if (!extensionId) return;
+      this.extensionsState.installingIds = {
+        ...this.extensionsState.installingIds,
+        [extensionId]: 'installing'
+      };
+      try {
+        const result = await desktopApi.installMarketplaceExtension?.({ extensionId });
+        if (result?.success) {
+          this.appendLog('success', `Installed extension: ${extensionId}`);
+          // Refresh installed extensions
+          await this.loadInstalledExtensions();
+          // Update marketplace results to mark as installed
+          this.extensionsState.marketplaceResults = this.extensionsState.marketplaceResults.map((ext) =>
+            (ext.extensionId || ext.id) === extensionId ? { ...ext, isInstalled: true } : ext
+          );
+        } else {
+          this.appendLog('error', `Install failed: ${result?.error || result?.message || 'Unknown error'}`);
+        }
+        this.extensionsState.installingIds = {
+          ...this.extensionsState.installingIds,
+          [extensionId]: result?.success ? 'installed' : 'failed'
+        };
+        return result;
+      } catch (error) {
+        this.appendLog('error', `Install failed: ${error?.message || error}`);
+        this.extensionsState.installingIds = {
+          ...this.extensionsState.installingIds,
+          [extensionId]: 'failed'
+        };
+        return { success: false, error: error?.message || String(error) };
+      }
+    },
+    async uninstallExtension(extensionId) {
+      if (!extensionId) return;
+      this.extensionsState.installingIds = {
+        ...this.extensionsState.installingIds,
+        [extensionId]: 'uninstalling'
+      };
+      try {
+        const result = await desktopApi.uninstallMarketplaceExtension?.({ extensionId });
+        if (result?.success) {
+          this.appendLog('success', `Uninstalled extension: ${extensionId}`);
+          await this.loadInstalledExtensions();
+          this.extensionsState.marketplaceResults = this.extensionsState.marketplaceResults.map((ext) =>
+            (ext.extensionId || ext.id) === extensionId ? { ...ext, isInstalled: false } : ext
+          );
+        }
+        this.extensionsState.installingIds = {
+          ...this.extensionsState.installingIds,
+          [extensionId]: result?.success ? 'uninstalled' : 'failed'
+        };
+        return result;
+      } catch (error) {
+        this.appendLog('error', `Uninstall failed: ${error?.message || error}`);
+        this.extensionsState.installingIds = {
+          ...this.extensionsState.installingIds,
+          [extensionId]: 'failed'
+        };
+        return { success: false, error: error?.message || String(error) };
+      }
     },
     async setKeybind(action, value) {
       if (!action) {

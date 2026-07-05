@@ -38,6 +38,38 @@ defineProps({
   keybinds: {
     type: Object,
     required: true
+  },
+  wordWrap: {
+    type: Boolean,
+    default: false
+  },
+  tabSize: {
+    type: Number,
+    default: 2
+  },
+  lineNumbers: {
+    type: Boolean,
+    default: true
+  },
+  minimap: {
+    type: Boolean,
+    default: false
+  },
+  renderWhitespace: {
+    type: String,
+    default: 'none'
+  },
+  bracketPairColorization: {
+    type: Boolean,
+    default: true
+  },
+  cursorBlinking: {
+    type: String,
+    default: 'blink'
+  },
+  smoothScrolling: {
+    type: Boolean,
+    default: false
   }
 });
 
@@ -50,7 +82,15 @@ defineEmits([
   'set-compact-folders',
   'set-shell-integration',
   'set-terminal-font-size',
-  'set-keybind'
+  'set-keybind',
+  'set-word-wrap',
+  'set-tab-size',
+  'set-line-numbers',
+  'set-minimap',
+  'set-render-whitespace',
+  'set-bracket-pair-colorization',
+  'set-cursor-blinking',
+  'set-smooth-scrolling'
 ]);
 
 const localeOptions = useLocaleOptions();
@@ -63,6 +103,20 @@ const keybindRows = [
   ['terminal', 'terminal'],
   ['undo', 'undo'],
   ['redo', 'redo']
+];
+
+const whitespaceOptions = [
+  { value: 'none', labelKey: 'renderWhitespaceNone' },
+  { value: 'boundary', labelKey: 'renderWhitespaceBoundary' },
+  { value: 'all', labelKey: 'renderWhitespaceAll' }
+];
+
+const cursorBlinkingOptions = [
+  { value: 'blink', labelKey: 'blink' },
+  { value: 'smooth', labelKey: 'smooth' },
+  { value: 'phase', labelKey: 'phase' },
+  { value: 'expand', labelKey: 'expand' },
+  { value: 'solid', labelKey: 'solid' }
 ];
 </script>
 
@@ -109,6 +163,60 @@ const keybindRows = [
         <input type="range" min="11" max="20" :value="editorFontSize" @input="$emit('set-editor-font-size', $event.target.value)" />
         <span>{{ editorFontSize }} px</span>
       </div>
+    </section>
+
+    <section class="settings-section">
+      <p class="pane__label">{{ t('editor') }}</p>
+      <h3>{{ t('editor') }}</h3>
+
+      <div class="settings-field settings-field--inline">
+        <label>{{ t('wordWrap') }}</label>
+        <input type="checkbox" :checked="wordWrap" @change="$emit('set-word-wrap', $event.target.checked)" />
+      </div>
+
+      <div class="settings-field settings-field--inline">
+        <label>{{ t('tabSize') }}</label>
+        <select :value="tabSize" class="settings-select" @change="$emit('set-tab-size', $event.target.value)">
+          <option :value="2">2</option>
+          <option :value="4">4</option>
+          <option :value="8">8</option>
+        </select>
+      </div>
+
+      <div class="settings-field settings-field--inline">
+        <label>{{ t('lineNumbers') }}</label>
+        <input type="checkbox" :checked="lineNumbers" @change="$emit('set-line-numbers', $event.target.checked)" />
+      </div>
+
+      <div class="settings-field settings-field--inline">
+        <label>{{ t('minimap') }}</label>
+        <input type="checkbox" :checked="minimap" @change="$emit('set-minimap', $event.target.checked)" />
+      </div>
+
+      <div class="settings-field settings-field--inline">
+        <label>{{ t('renderWhitespace') }}</label>
+        <select :value="renderWhitespace" class="settings-select" @change="$emit('set-render-whitespace', $event.target.value)">
+          <option v-for="opt in whitespaceOptions" :key="opt.value" :value="opt.value">{{ t(opt.labelKey) }}</option>
+        </select>
+      </div>
+
+      <div class="settings-field settings-field--inline">
+        <label>{{ t('bracketPairColorization') }}</label>
+        <input type="checkbox" :checked="bracketPairColorization" @change="$emit('set-bracket-pair-colorization', $event.target.checked)" />
+      </div>
+
+      <div class="settings-field settings-field--inline">
+        <label>{{ t('cursorBlinking') }}</label>
+        <select :value="cursorBlinking" class="settings-select" @change="$emit('set-cursor-blinking', $event.target.value)">
+          <option v-for="opt in cursorBlinkingOptions" :key="opt.value" :value="opt.value">{{ t(opt.labelKey) }}</option>
+        </select>
+      </div>
+
+      <div class="settings-field settings-field--inline">
+        <label>{{ t('smoothScrolling') }}</label>
+        <input type="checkbox" :checked="smoothScrolling" @change="$emit('set-smooth-scrolling', $event.target.checked)" />
+      </div>
+
       <div class="settings-field">
         <label>{{ t('autoSave') }}</label>
         <select :value="autoSave" class="settings-input" @change="$emit('set-auto-save', $event.target.value)">

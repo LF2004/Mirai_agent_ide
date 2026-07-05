@@ -185,6 +185,70 @@ export function deleteWorkspacePath(workspacePath, targetPath) {
   };
 }
 
+/**
+ * Snapshot all files under a path before deletion, so we can restore them on undo.
+ * Returns an array of { path, content, isDirectory, isBinary?, dataUrl? } entries
+ * in depth-first order (parents before children), which is the order needed for recreation.
+ * Binary files (images, etc.) are stored as base64 data URLs so they can be fully restored.
+ */
+export function snapshotWorkspacePath(workspacePath, targetPath) {
+  if (!targetPath || targetPath === '.') {
+    return [];
+  }
+
+  const absolutePath = resolveInsideWorkspace(workspacePath, targetPath);
+  if (!fs.existsSync(absolutePath)) {
+    return [];
+  }
+
+  const entries = [];
+  const IMAGE_EXTENSIONS = new Set(Object.keys(IMAGE_MIME_TYPES));
+
+  function walk(currentPath, relativePath) {
+    const stats = fs.statSync(currentPath);
+    if (stats.isDirectory()) {
+      entries.push({ path: relativePath, content: '', isDirectory: true });
+      const children = fs.readdirSync(currentPath, { withFileTypes: true });
+      for (const child of children) {
+        if (child.name.startsWith('.git')) {
+          continue;
+        }
+        walk(path.join(currentPath, child.name), `${relativePath}/${child.name}`);
+      }
+    } else {
+      const ext = path.extname(currentPath).slice(1).toLowerCase();
+      if (IMAGE_EXTENSIONS.has(ext)) {
+        // Store binary files as base64 data URL so they can be fully restored
+        try {
+          const buffer = fs.readFileSync(currentPath);
+          const mime = IMAGE_MIME_TYPES[ext] || 'application/octet-stream';
+          const base64 = buffer.toString('base64');
+          entries.push({
+            path: relativePath,
+            content: '',
+            isDirectory: false,
+            isBinary: true,
+            dataUrl: `data:${mime};base64,${base64}`
+          });
+        } catch {
+          entries.push({ path: relativePath, content: '', isDirectory: false, isBinary: true, dataUrl: '' });
+        }
+      } else {
+        let content = '';
+        try {
+          content = fs.readFileSync(currentPath, 'utf8');
+        } catch {
+          content = '';
+        }
+        entries.push({ path: relativePath, content, isDirectory: false });
+      }
+    }
+  }
+
+  walk(absolutePath, normalizePath(targetPath));
+  return entries;
+}
+
 function walkDirectory(rootPath, currentPath) {
   const stats = fs.statSync(currentPath);
   const node = {
