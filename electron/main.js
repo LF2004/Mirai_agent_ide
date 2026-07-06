@@ -19,6 +19,36 @@ let terminalTools = null;
 let extensionTools = null;
 let agentService = null;
 
+function getMimeTypeFromPath(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const map = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.bmp': 'image/bmp',
+    '.svg': 'image/svg+xml',
+    '.txt': 'text/plain',
+    '.md': 'text/markdown',
+    '.json': 'application/json',
+    '.js': 'text/javascript',
+    '.ts': 'text/typescript',
+    '.vue': 'text/plain',
+    '.css': 'text/css',
+    '.html': 'text/html',
+    '.yml': 'text/yaml',
+    '.yaml': 'text/yaml',
+    '.xml': 'application/xml',
+    '.csv': 'text/csv'
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
+function isTextMime(mime) {
+  return mime.startsWith('text/') || ['application/json', 'application/xml'].includes(mime);
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1600,
@@ -301,10 +331,65 @@ function registerIpcHandlers() {
     return { ok: true };
   });
 
+  ipcMain.handle('agent:pick-attachments', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Attach files',
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: 'All Files', extensions: ['*'] },
+        { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'] }
+      ]
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return [];
+    }
+
+    return result.filePaths;
+  });
+
+  ipcMain.handle('agent:read-attachment', async (_, filePath) => {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return { ok: false, error: 'Attachment not found' };
+    }
+
+    const stat = fs.statSync(filePath);
+    const mime = getMimeTypeFromPath(filePath);
+    const base = {
+      ok: true,
+      name: path.basename(filePath),
+      path: filePath,
+      size: stat.size,
+      mime
+    };
+
+    if (mime.startsWith('image/')) {
+      const data = fs.readFileSync(filePath).toString('base64');
+      return {
+        ...base,
+        kind: 'image',
+        dataUrl: `data:${mime};base64,${data}`
+      };
+    }
+
+    if (isTextMime(mime) || stat.size <= 1024 * 1024) {
+      return {
+        ...base,
+        kind: 'text',
+        textContent: fs.readFileSync(filePath, 'utf8').slice(0, 200000)
+      };
+    }
+
+    return {
+      ...base,
+      kind: 'file'
+    };
+  });
+
   // Agent send with streaming events via webContents.send
   ipcMain.handle('agent:send', async (_, payload) => {
-    const { sessionId, content } = payload || {};
-    if (!sessionId || !content) {
+    const { sessionId, content, attachments } = payload || {};
+    if (!sessionId || (!String(content || '').trim() && (!Array.isArray(attachments) || attachments.length === 0))) {
       return { ok: false, error: 'Missing sessionId or content' };
     }
 
@@ -314,7 +399,7 @@ function registerIpcHandlers() {
       agentService.setWorkspace(state.workspacePath, state.workspaceName);
     }
 
-    await agentService.sendMessage(sessionId, content, (event) => {
+    await agentService.sendMessage(sessionId, content, attachments || [], (event) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('agent:event', { sessionId, ...event });
       }
@@ -353,6 +438,11 @@ function registerIpcHandlers() {
   ipcMain.handle('agent:delete-session', async (_, sessionId) => {
     agentService.deleteSession(sessionId);
     return { ok: true };
+  });
+
+  ipcMain.handle('agent:rename-session', async (_, payload) => {
+    const ok = agentService.renameSession(payload?.sessionId, payload?.title);
+    return { ok };
   });
 
   // Get diagnostics log

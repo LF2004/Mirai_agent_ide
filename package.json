@@ -20,6 +20,9 @@
   ],
   "author": "",
   "license": "MIT",
+  "config": {
+    "electron_mirror": "https://npmmirror.com/mirrors/electron/"
+  },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.10.4",
@@ -38,18 +41,16 @@
     "@lezer/highlight": "^1.2.3",
     "@monaco-editor/loader": "^1.7.0",
     "@vscode/codicons": "^0.0.45",
-    "@xterm/addon-fit": "^0.11.0",
-    "@xterm/addon-search": "^0.17.0-beta.288",
-    "@xterm/xterm": "^6.0.0",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-search": "0.16.0",
+    "@xterm/xterm": "6.0.0",
     "chokidar": "^4.0.3",
     "highlight.js": "^11.11.1",
     "marked": "^17.0.1",
     "monaco-editor": "^0.54.0",
     "node-pty": "^1.1.0",
     "pinia": "^3.0.3",
-    "vue": "^3.5.22",
-    "xterm": "^5.3.0",
-    "xterm-addon-fit": "^0.8.0"
+    "vue": "^3.5.22"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.7",
@@ -63,6 +64,9 @@
   "build": {
     "appId": "com.mirai.agentide",
     "productName": "Mirai Agent IDE",
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
     "directories": {
       "output": "release"
     },

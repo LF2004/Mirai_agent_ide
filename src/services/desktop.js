@@ -537,11 +537,24 @@ function buildMockApi() {
     async agentGetMessages() { return []; },
     async agentClearSession() { return { ok: true }; },
     async agentAbort() { return { ok: true }; },
+    async agentPickAttachments() { return []; },
+    async agentReadAttachment(filePath) {
+      return {
+        ok: true,
+        name: filePath?.split(/[\\/]/).pop() || 'attachment.txt',
+        path: filePath || '',
+        size: 0,
+        mime: 'text/plain',
+        kind: 'text',
+        textContent: ''
+      };
+    },
     async agentSend() { return { ok: true }; },
     async agentSetWorkspace() { return { ok: true }; },
     async agentListSessions() { return []; },
     async agentLoadSession() { return { ok: false, error: 'Mock mode' }; },
     async agentDeleteSession() { return { ok: true }; },
+    async agentRenameSession() { return { ok: true }; },
     async agentGetDiagnostics() { return []; },
     onAgentEvent() {},
     offAgentEvent() {}

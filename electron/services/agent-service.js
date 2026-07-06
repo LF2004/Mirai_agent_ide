@@ -119,6 +119,37 @@ function safeParseJSON(value, defaultValue = {}) {
 
 function buildOpenAIInputMessages(messages) {
   return messages.map((message) => {
+    if (message.role === 'user') {
+      const userContent = [];
+      if (message.content) {
+        userContent.push({ type: 'text', text: message.content });
+      }
+      for (const attachment of message.attachments || []) {
+        if (attachment.kind === 'image' && attachment.dataUrl) {
+          userContent.push({
+            type: 'image_url',
+            image_url: { url: attachment.dataUrl }
+          });
+          continue;
+        }
+        if (attachment.kind === 'text' && attachment.textContent) {
+          userContent.push({
+            type: 'text',
+            text: `Attached file: ${attachment.name}\n\n${attachment.textContent}`
+          });
+          continue;
+        }
+        userContent.push({
+          type: 'text',
+          text: `Attached file: ${attachment.name} (${attachment.mime || 'file'}, ${attachment.size || 0} bytes)`
+        });
+      }
+      return {
+        role: 'user',
+        content: userContent.length ? userContent : message.content || ''
+      };
+    }
+
     if (message.role === 'tool') {
       return {
         role: 'tool',
@@ -161,7 +192,19 @@ function buildOpenAIInputMessages(messages) {
 
 function buildResponsesPayload(model, messages, tools) {
   const systemMessage = messages.find((m) => m.role === 'system');
-  const inputMessages = buildOpenAIInputMessages(messages.filter((m) => m.role !== 'system'));
+  const inputMessages = buildOpenAIInputMessages(messages.filter((m) => m.role !== 'system')).map((message) => {
+    if (message.role !== 'user' || !Array.isArray(message.content)) {
+      return message;
+    }
+    return {
+      ...message,
+      content: message.content.map((item) => {
+        if (item.type === 'text') return { type: 'input_text', text: item.text };
+        if (item.type === 'image_url') return { type: 'input_image', image_url: item.image_url?.url || '' };
+        return item;
+      })
+    };
+  });
   const payload = {
     model: model.modelId,
     input: inputMessages,
@@ -346,6 +389,19 @@ function normalizeSessionMessages(messages = []) {
   return messages.map((message) => ({
     role: message.role,
     content: message.content || '',
+    attachments: Array.isArray(message.attachments)
+      ? message.attachments.map((attachment) => ({
+          id: attachment.id,
+          name: attachment.name,
+          path: attachment.path,
+          kind: attachment.kind,
+          mime: attachment.mime,
+          size: attachment.size,
+          textContent: attachment.textContent,
+          dataUrl: attachment.dataUrl,
+          createdAt: attachment.createdAt
+        }))
+      : undefined,
     tool_calls: Array.isArray(message.tool_calls)
       ? message.tool_calls.map((tc) => ({
           id: tc.id,
@@ -507,6 +563,34 @@ async function callAnthropicStream(model, messages, tools, signal, dispatcher = 
         });
       }
       return { role: 'assistant', content };
+    }
+    if (m.role === 'user') {
+      const content = [];
+      if (m.content) {
+        content.push({ type: 'text', text: m.content });
+      }
+      for (const attachment of m.attachments || []) {
+        if (attachment.kind === 'image' && attachment.dataUrl) {
+          const match = String(attachment.dataUrl).match(/^data:([^;]+);base64,(.+)$/);
+          if (match) {
+            content.push({
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: match[1],
+                data: match[2]
+              }
+            });
+            continue;
+          }
+        }
+        if (attachment.kind === 'text' && attachment.textContent) {
+          content.push({ type: 'text', text: `Attached file: ${attachment.name}\n\n${attachment.textContent}` });
+        } else {
+          content.push({ type: 'text', text: `Attached file: ${attachment.name}` });
+        }
+      }
+      return { role: 'user', content: content.length ? content : m.content };
     }
     return { role: m.role, content: m.content };
   }).filter(Boolean);
@@ -899,7 +983,7 @@ export class AgentService {
       messages: [],
       status: SESSION_STATUS.IDLE,
       createdAt: Date.now(),
-      title: 'New Session'
+      title: 'New Agent'
     };
     this.sessions.set(id, session);
     this.persistSession(id);
@@ -936,6 +1020,17 @@ export class AgentService {
     this.deletePersistedSession(sessionId);
     this.circuitBreakers.delete(sessionId);
     this.log('info', `Session deleted: ${sessionId}`);
+  }
+
+  renameSession(sessionId, title) {
+    const session = this.getSession(sessionId);
+    if (!session) {
+      return false;
+    }
+    session.title = String(title || '').trim() || 'Untitled Session';
+    this.persistSession(sessionId);
+    this.log('info', `Session renamed`, { sessionId, title: session.title });
+    return true;
   }
 
   abort() {
@@ -987,7 +1082,7 @@ export class AgentService {
     }
   }
 
-  async sendMessage(sessionId, content, onEvent) {
+  async sendMessage(sessionId, content, attachments = [], onEvent) {
     let session = this.getSession(sessionId);
     if (!session) {
       onEvent({ type: 'error', error: 'Session not found' });
@@ -1014,7 +1109,7 @@ export class AgentService {
     const { signal } = this.activeController;
 
     // ===== State machine: IDLE → PROCESSING =====
-    session.messages.push({ role: 'user', content });
+    session.messages.push({ role: 'user', content, attachments });
     if (!session.title || session.title === 'New Session') {
       session.title = content.slice(0, 60);
     }

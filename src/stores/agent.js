@@ -1,5 +1,4 @@
 import { defineStore } from 'pinia';
-import { toRaw } from 'vue';
 import { getDesktopApi } from '../services/desktop.js';
 
 const desktopApi = getDesktopApi();
@@ -15,6 +14,92 @@ function toPlain(obj) {
 
 function generateId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function generateRequestId() {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+  return `req-${generateId()}`;
+}
+
+function parseToolResultContent(content) {
+  if (content == null || content === '') return null;
+  if (typeof content === 'object' && typeof content.success === 'boolean') {
+    return content;
+  }
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed.success === 'boolean') {
+      return parsed;
+    }
+    return { success: true, result: parsed };
+  } catch {
+    const text = String(content);
+    if (text.startsWith('Error:')) {
+      return { success: false, error: text.slice(6).trim() };
+    }
+    return { success: true, result: text };
+  }
+}
+
+function normalizeAttachment(attachment = {}) {
+  return {
+    id: attachment.id || `att-${generateId()}`,
+    name: attachment.name || 'attachment',
+    path: attachment.path || '',
+    kind: attachment.kind || 'file',
+    mime: attachment.mime || '',
+    size: Number(attachment.size) || 0,
+    textContent: attachment.textContent || '',
+    dataUrl: attachment.dataUrl || '',
+    createdAt: attachment.createdAt || new Date().toISOString()
+  };
+}
+
+function hydrateSessionMessages(messages = []) {
+  const hydrated = [];
+  const toolCallIndex = new Map();
+
+  for (const message of messages) {
+    if (message.role === 'tool') {
+      const target = toolCallIndex.get(message.tool_call_id);
+      if (target) {
+        target.result = parseToolResultContent(message.content);
+      }
+      continue;
+    }
+
+    const hydratedMessage = {
+      id: `restored-${generateId()}`,
+      role: message.role,
+      content: message.content || '',
+      attachments: Array.isArray(message.attachments) ? message.attachments.map(normalizeAttachment) : [],
+      createdAt: message.createdAt || new Date().toISOString(),
+      status: 'done'
+    };
+
+    if (message.role === 'assistant') {
+      const toolCalls = Array.isArray(message.tool_calls)
+        ? message.tool_calls.map((tc) => ({
+            id: tc.id || `tool-${generateId()}`,
+            name: tc.function?.name || '',
+            arguments: tc.function?.arguments || '{}',
+            result: null,
+            expanded: false
+          }))
+        : [];
+
+      hydratedMessage.toolCalls = toolCalls;
+      for (const toolCall of toolCalls) {
+        toolCallIndex.set(toolCall.id, toolCall);
+      }
+    }
+
+    hydrated.push(hydratedMessage);
+  }
+
+  return hydrated;
 }
 
 function createDefaultOpenAIModel() {
@@ -121,7 +206,12 @@ export const useAgentStore = defineStore('agent', {
       title: '',
       steps: [],
       updatedAt: ''
-    }
+    },
+
+    activeRequestId: '',
+    diagnostics: [],
+    diagnosticsLoadedAt: '',
+    lastErrorAt: ''
   }),
 
   getters: {
@@ -262,18 +352,34 @@ export const useAgentStore = defineStore('agent', {
           msg.content += event.content;
           break;
         }
+        case 'workflow': {
+          this.setWorkflow({
+            mode: event.mode || this.mode,
+            ...event.workflow,
+            updatedAt: new Date().toISOString()
+          });
+          break;
+        }
         case 'tool_call': {
           // Add tool call to the current streaming message
           let msg = this.messages.find(m => m.id === this.streamingMessageId);
           if (!msg) return;
           if (!msg.toolCalls) msg.toolCalls = [];
-          msg.toolCalls.push({
-            id: event.id,
-            name: event.name,
-            arguments: event.arguments,
-            result: null,
-            expanded: false
-          });
+          const existing = msg.toolCalls.find((tc) => tc.id === event.id || (!event.id && tc.name === event.name));
+          if (existing) {
+            if (event.name) existing.name = event.name;
+            if (typeof event.arguments === 'string' && event.arguments) {
+              existing.arguments = event.arguments;
+            }
+          } else {
+            msg.toolCalls.push({
+              id: event.id || `tool-${generateId()}`,
+              name: event.name,
+              arguments: event.arguments || '{}',
+              result: null,
+              expanded: false
+            });
+          }
           break;
         }
         case 'tool_result': {
@@ -301,10 +407,13 @@ export const useAgentStore = defineStore('agent', {
           }
           this.isStreaming = false;
           this.streamingMessageId = null;
+          this.activeRequestId = '';
+          this.loadSessionHistory();
           break;
         }
         case 'error': {
           this.error = event.error;
+           this.lastErrorAt = new Date().toISOString();
           let msg = this.messages.find(m => m.id === this.streamingMessageId);
           if (msg) {
             msg.status = 'error';
@@ -312,13 +421,17 @@ export const useAgentStore = defineStore('agent', {
           }
           this.isStreaming = false;
           this.streamingMessageId = null;
+          this.activeRequestId = '';
+          this.loadSessionHistory();
           break;
         }
       }
     },
 
-    async send(content) {
-      if (!content.trim() || this.isStreaming) return;
+    async send(content, attachments = []) {
+      const text = String(content || '').trim();
+      const normalizedAttachments = Array.isArray(attachments) ? attachments.map(normalizeAttachment) : [];
+      if ((!text && normalizedAttachments.length === 0) || this.isStreaming) return;
 
       this.registerEventListener();
       await this.ensureSession();
@@ -328,33 +441,42 @@ export const useAgentStore = defineStore('agent', {
       this.messages.push({
         id: userMsgId,
         role: 'user',
-        content: content.trim(),
-        status: 'done'
+        content: text,
+        attachments: normalizedAttachments,
+        status: 'done',
+        createdAt: new Date().toISOString()
       });
 
       // Add placeholder assistant message for streaming
       const assistantMsgId = `msg-${Date.now()}-a`;
+      const requestId = generateRequestId();
       this.messages.push({
         id: assistantMsgId,
         role: 'assistant',
         content: '',
         toolCalls: [],
-        status: 'streaming'
+        status: 'streaming',
+        requestId,
+        createdAt: new Date().toISOString()
       });
 
       this.streamingMessageId = assistantMsgId;
+      this.activeRequestId = requestId;
       this.isStreaming = true;
       this.error = null;
 
       try {
         await desktopApi.agentSend({
           sessionId: this.sessionId,
-          content: content.trim()
+          content: text,
+          attachments: normalizedAttachments
         });
       } catch (err) {
         this.error = err.message;
+        this.lastErrorAt = new Date().toISOString();
         this.isStreaming = false;
         this.streamingMessageId = null;
+        this.activeRequestId = '';
         let msg = this.messages.find(m => m.id === assistantMsgId);
         if (msg) {
           msg.status = 'error';
@@ -376,6 +498,7 @@ export const useAgentStore = defineStore('agent', {
         }
         this.streamingMessageId = null;
       }
+      this.activeRequestId = '';
     },
 
     async clearChat() {
@@ -390,6 +513,7 @@ export const useAgentStore = defineStore('agent', {
         steps: [],
         updatedAt: ''
       };
+      this.activeRequestId = '';
       this.sessionInitPromise = null;
       if (this.sessionId) {
         try {
@@ -412,6 +536,7 @@ export const useAgentStore = defineStore('agent', {
         steps: [],
         updatedAt: ''
       };
+      this.activeRequestId = '';
       this.mode = String(mode || 'agent');
       this.sessionId = await desktopApi.agentCreateSession(this.mode);
       await this.loadSessionHistory();
@@ -439,6 +564,7 @@ export const useAgentStore = defineStore('agent', {
         this.error = null;
         this.isStreaming = false;
         this.streamingMessageId = null;
+        this.activeRequestId = '';
         this.sessionInitPromise = null;
       }
 
@@ -468,13 +594,7 @@ export const useAgentStore = defineStore('agent', {
         const result = await desktopApi.agentLoadSession(sessionId);
         if (result.ok && result.session) {
           // Restore messages into the store
-          this.messages = result.session.messages.map((m, i) => ({
-            id: `restored-${sessionId}-${i}`,
-            role: m.role,
-            content: m.content || '',
-            toolCalls: m.tool_calls || [],
-            status: 'done'
-          }));
+          this.messages = hydrateSessionMessages(result.session.messages);
           this.sessionId = sessionId;
           this.sessionInitPromise = null;
           this.mode = result.session.mode || 'agent';
@@ -501,11 +621,35 @@ export const useAgentStore = defineStore('agent', {
         if (this.sessionId === sessionId) {
           this.sessionId = null;
           this.messages = [];
+          this.workflow = {
+            mode: this.mode,
+            title: '',
+            steps: [],
+            updatedAt: ''
+          };
+          this.activeRequestId = '';
           this.sessionInitPromise = null;
           this.activeSessionIndex = 0;
         }
       } catch (err) {
         console.error('Failed to delete session:', err);
+      }
+    },
+
+    async renameSession(sessionId, title) {
+      const value = String(title || '').trim();
+      if (!sessionId || !value) return false;
+      try {
+        const result = await desktopApi.agentRenameSession({ sessionId, title: value });
+        if (!result?.ok) return false;
+        const session = this.sessionHistory.find((item) => item.id === sessionId);
+        if (session) {
+          session.title = value;
+        }
+        return true;
+      } catch (err) {
+        console.error('Failed to rename session:', err);
+        return false;
       }
     },
 
@@ -524,6 +668,25 @@ export const useAgentStore = defineStore('agent', {
       } catch {
         return [];
       }
+    },
+
+    async refreshDiagnostics() {
+      this.diagnostics = await this.getDiagnostics();
+      this.diagnosticsLoadedAt = new Date().toISOString();
+      return this.diagnostics;
+    },
+
+    buildSessionExport(sessionId = this.sessionId) {
+      const session = this.sessionHistory.find((item) => item.id === sessionId) || null;
+      return {
+        exportedAt: new Date().toISOString(),
+        sessionId,
+        mode: this.mode,
+        session,
+        workflow: toPlain(this.workflow),
+        messages: toPlain(this.messages),
+        diagnostics: toPlain(this.diagnostics)
+      };
     },
 
     toggleToolCallExpand(messageId, toolCallId) {
